@@ -1,0 +1,97 @@
+{
+  "name": "ai-firewall-desktop",
+  "productName": "AI Firewall",
+  "version": "1.0.0",
+  "description": "AI Firewall Desktop Security Suite for Windows",
+  "author": "AI Firewall Security Team",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently \"python ../backend/main.py\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build:backend": "python -m PyInstaller ../aifirewall-backend.spec --clean --distpath build-resources/backend --workpath ../build",
+    "build:frontend": "vite build",
+    "build:electron": "electron-builder",
+    "build": "npm run build:frontend && npm run build:electron",
+    "dist": "npm run build:backend && npm run build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "desktop": "electron .",
+    "package:win": "electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.13.1",
+    "recharts": "^3.8.0",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.0",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.2.1",
+    "electron": "^39.2.6",
+    "electron-builder": "^26.0.12",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "vite": "^8.0.0",
+    "wait-on": "^9.0.1"
+  },
+  "build": {
+    "appId": "com.aifirewall.app",
+    "productName": "AI Firewall",
+    "copyright": "Copyright 2026",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build-resources/backend/aifirewall-backend",
+        "to": "backend/aifirewall-backend"
+      },
+      {
+        "from": "uninstall_cleanup.ps1",
+        "to": "uninstall_cleanup.ps1"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator",
+      "artifactName": "AI-Firewall-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Firewall",
+      "runAfterFinish": false,
+      "installerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "include": "installer.nsh"
+    }
+  }
+}

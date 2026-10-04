@@ -1,0 +1,64 @@
+# Databases and SQLite artifacts
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Log files and log directories
+*.log
+*.log.*
+logs/
+backend/logs/
+
+# Keys, credentials, environments, and secrets
+keys/
+backend/keys/
+*.key
+*.pem
+*.cert
+*.crt
+.env
+.env.*
+!.env.example
+
+# Build and distribution directories
+build/
+dist/
+release/
+out/
+build-resources/
+frontend/dist/
+frontend/release/
+frontend/build-resources/
+*.spec.bak
+*.sha256.txt
+
+# Node dependencies
+node_modules/
+frontend/node_modules/
+
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Local runtime data, backups, and quarantine
+scratch/
+quarantine/
+backups/
+runtime_port.json
+backend/runtime/
+*.bak
+
+# IDE and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
