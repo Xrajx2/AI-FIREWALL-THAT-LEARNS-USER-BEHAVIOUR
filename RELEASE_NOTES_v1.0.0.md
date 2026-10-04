@@ -5,7 +5,7 @@
 **Target Platform:** Windows 10 / Windows 11 (64-bit)  
 **SHA-256 Checksum:**  
 ```
-B28D225EFF6CD57233A3F242F018D438703F49489A7E3BBB6D69374703B204D0
+8D2938FC619280A0F764E0D68B48207604F55490999B6760B1BDC435A2C679E8
 ```
 
 ---
@@ -29,7 +29,7 @@ B28D225EFF6CD57233A3F242F018D438703F49489A7E3BBB6D69374703B204D0
 1. Download **`AI-Firewall-Setup-1.0.0.exe`** and the checksum file **`AI-Firewall-Setup-1.0.0.exe.sha256.txt`**.
 2. Verify the SHA-256 checksum in PowerShell:
    ```powershell
-   (Get-FileHash -Algorithm SHA256 .\AI-Firewall-Setup-1.0.0.exe).Hash -eq "B28D225EFF6CD57233A3F242F018D438703F49489A7E3BBB6D69374703B204D0"
+   (Get-FileHash -Algorithm SHA256 .\AI-Firewall-Setup-1.0.0.exe).Hash -eq "8D2938FC619280A0F764E0D68B48207604F55490999B6760B1BDC435A2C679E8"
    ```
 3. Run `AI-Firewall-Setup-1.0.0.exe`.
 4. Accept the Windows User Account Control (UAC) prompt to allow Administrator elevation.

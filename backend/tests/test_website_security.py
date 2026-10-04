@@ -30,8 +30,8 @@ class TestWebsiteSecurity(unittest.TestCase):
         self.assertIn("[REDACTED]", sanitized)
 
     def test_safe_website_evaluation(self):
-        result = website_security_service.evaluate_url("https://paruluniversity.ac.in", self.db)
-        self.assertEqual(result["domain"], "paruluniversity.ac.in")
+        result = website_security_service.evaluate_url("https://wikipedia.org", self.db)
+        self.assertEqual(result["domain"], "wikipedia.org")
         self.assertEqual(result["threat_status"], "Safe")
         self.assertLess(result["threat_score"], 30.0)
         self.assertEqual(result["action_taken"], "allowed")

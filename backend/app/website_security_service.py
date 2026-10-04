@@ -22,7 +22,7 @@ KNOWN_SUSPICIOUS_TLDS = {
 HIGH_PROFILE_BRANDS = [
     "paypal", "chase", "bankofamerica", "wellsfargo", "facebook", "google",
     "amazon", "netflix", "binance", "coinbase", "apple", "microsoft",
-    "instagram", "github", "twitter", "linkedin", "steampowered", "paruluniversity"
+    "instagram", "github", "twitter", "linkedin", "steampowered", "wikipedia"
 ]
 
 DEFAULT_CONFIG = {
