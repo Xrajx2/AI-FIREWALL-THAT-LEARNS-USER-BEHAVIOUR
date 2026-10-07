@@ -4,6 +4,8 @@ import json
 import os
 import platform
 import subprocess
+import uuid
+import psutil
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +28,7 @@ from .usb_control import (
 )
 
 
-MONITOR_INTERVAL_SECONDS = float(os.getenv("MONITOR_INTERVAL_SECONDS", "5"))
+MONITOR_INTERVAL_SECONDS = float(os.getenv("MONITOR_INTERVAL_SECONDS", "30"))
 FILE_EVENT_WINDOW_SECONDS = float(os.getenv("FILE_EVENT_WINDOW_SECONDS", "15"))
 EXTERNAL_MONITOR_TTL_SECONDS = float(os.getenv("EXTERNAL_MONITOR_TTL_SECONDS", "20"))
 EXTERNAL_MONITOR_STATE_PATH = Path(
@@ -85,9 +87,14 @@ class SystemMonitorService:
                     self.snapshot = external_snapshot
                 else:
                     snapshot, events = await asyncio.to_thread(self._collect_snapshot)
-                    self.snapshot = snapshot
+                    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                     await self.connection_manager.broadcast(
-                        json.dumps({"type": "SYSTEM_MONITOR_UPDATE", "data": snapshot}),
+                        json.dumps({
+                            "id": str(uuid.uuid4()),
+                            "type": "SYSTEM_MONITOR_UPDATE",
+                            "timestamp": now_utc,
+                            "data": snapshot,
+                        }),
                         admin_only=True,
                     )
                     for event in events:
@@ -110,8 +117,14 @@ class SystemMonitorService:
         self._external_snapshot_received_at = datetime.now(timezone.utc)
         self._persist_external_snapshot(normalized_snapshot)
         self.snapshot = normalized_snapshot
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         await self.connection_manager.broadcast(
-            json.dumps({"type": "SYSTEM_MONITOR_UPDATE", "data": normalized_snapshot}),
+            json.dumps({
+                "id": str(uuid.uuid4()),
+                "type": "SYSTEM_MONITOR_UPDATE",
+                "timestamp": now_utc,
+                "data": normalized_snapshot,
+            }),
             admin_only=True,
         )
         for event in filter_usb_activities(events)[:10]:
@@ -166,53 +179,85 @@ class SystemMonitorService:
 
     def _collect_processes(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         errors: List[str] = []
-        processes = self._run_powershell_json(
-            """
-            Get-Process |
-              Sort-Object -Property CPU -Descending |
-              Select-Object -First 12 Id, ProcessName,
-                @{Name='CPU';Expression={if ($_.CPU) { [math]::Round($_.CPU, 2) } else { 0 }}},
-                @{Name='MemoryMB';Expression={[math]::Round($_.WS / 1MB, 2)}},
-                Path |
-              ConvertTo-Json -Compress
-            """,
-            errors,
-        )
-        process_inventory = self._run_powershell_json(
-            """
-            Get-Process |
-              Select-Object Id, ProcessName |
-              ConvertTo-Json -Compress
-            """,
-            errors,
-        )
         process_index: Dict[int, str] = {}
-        top_processes: List[Dict[str, Any]] = []
         all_pids: Set[int] = set()
+        top_processes: List[Dict[str, Any]] = []
 
-        for item in self._ensure_list(processes):
-            pid = self._safe_int(item.get("Id"))
-            name = item.get("ProcessName") or "unknown"
-            if pid is None:
-                continue
-            process_index[pid] = name
-            top_processes.append(
-                {
-                    "pid": pid,
-                    "name": name,
-                    "cpu": self._safe_float(item.get("CPU"), 0.0),
-                    "memory_mb": self._safe_float(item.get("MemoryMB"), 0.0),
-                    "path": item.get("Path") or "",
-                }
+        # Pure Python enumeration via psutil (0 child processes)
+        if psutil is not None:
+            try:
+                candidate_procs: List[Dict[str, Any]] = []
+                for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info', 'exe']):
+                    try:
+                        pinfo = proc.info
+                        pid = pinfo.get('pid')
+                        if pid is None:
+                            continue
+                        name = pinfo.get('name') or 'unknown'
+                        exe_path = pinfo.get('exe') or ''
+                        cpu = float(pinfo.get('cpu_percent') or 0.0)
+                        mem_info = pinfo.get('memory_info')
+                        mem_mb = round(mem_info.rss / (1024 * 1024), 2) if mem_info else 0.0
+                        all_pids.add(pid)
+                        process_index[pid] = name
+                        candidate_procs.append({
+                            "pid": pid,
+                            "name": name,
+                            "cpu": cpu,
+                            "memory_mb": mem_mb,
+                            "path": exe_path,
+                        })
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                candidate_procs.sort(key=lambda p: (p.get("cpu", 0.0), p.get("memory_mb", 0.0)), reverse=True)
+                top_processes = candidate_procs[:12]
+            except Exception as exc:
+                errors.append(f"psutil process enumeration error: {exc}")
+
+        # Fallback to PowerShell only if psutil returned nothing and we are on Windows
+        if not all_pids and os.name == "nt":
+            processes = self._run_powershell_json(
+                """
+                Get-Process |
+                  Sort-Object -Property CPU -Descending |
+                  Select-Object -First 12 Id, ProcessName,
+                    @{Name='CPU';Expression={if ($_.CPU) { [math]::Round($_.CPU, 2) } else { 0 }}},
+                    @{Name='MemoryMB';Expression={[math]::Round($_.WS / 1MB, 2)}},
+                    Path |
+                  ConvertTo-Json -Compress
+                """,
+                errors,
             )
-
-        for item in self._ensure_list(process_inventory):
-            pid = self._safe_int(item.get("Id"))
-            name = item.get("ProcessName") or "unknown"
-            if pid is None:
-                continue
-            all_pids.add(pid)
-            process_index.setdefault(pid, name)
+            process_inventory = self._run_powershell_json(
+                """
+                Get-Process |
+                  Select-Object Id, ProcessName |
+                  ConvertTo-Json -Compress
+                """,
+                errors,
+            )
+            for item in self._ensure_list(processes):
+                pid = self._safe_int(item.get("Id"))
+                name = item.get("ProcessName") or "unknown"
+                if pid is None:
+                    continue
+                process_index[pid] = name
+                top_processes.append(
+                    {
+                        "pid": pid,
+                        "name": name,
+                        "cpu": self._safe_float(item.get("CPU"), 0.0),
+                        "memory_mb": self._safe_float(item.get("MemoryMB"), 0.0),
+                        "path": item.get("Path") or "",
+                    }
+                )
+            for item in self._ensure_list(process_inventory):
+                pid = self._safe_int(item.get("Id"))
+                name = item.get("ProcessName") or "unknown"
+                if pid is None:
+                    continue
+                all_pids.add(pid)
+                process_index.setdefault(pid, name)
 
         live_pids = all_pids or set(process_index.keys())
         had_previous_processes = bool(self._known_processes)
@@ -226,7 +271,17 @@ class SystemMonitorService:
                     "action_type": "process_start",
                     "device": platform.node() or "localhost",
                     "network_activity": 0.0,
-                    "details": f"New process detected: {process_index[pid]} (PID {pid})",
+                    "details": {
+                        "summary": f"New process detected: {process_index[pid]} (PID {pid})",
+                        "process_name": process_index[pid],
+                        "pid": pid,
+                        "applications": [
+                            {
+                                "name": process_index[pid],
+                                "source": "process_start",
+                            }
+                        ],
+                    },
                     "behavior_context": {
                         "applications": [
                             {
@@ -255,17 +310,55 @@ class SystemMonitorService:
             return ({**empty_usb_snapshot(), "errors": []}, [])
 
         errors: List[str] = []
-        devices_json = self._run_powershell_json(
-            """
-            Get-CimInstance Win32_LogicalDisk |
-              Where-Object { $_.DriveType -eq 2 } |
-              Select-Object DeviceID, VolumeName,
-                @{Name='SizeGB';Expression={if ($_.Size) { [math]::Round($_.Size / 1GB, 2) } else { 0 }}},
-                @{Name='FreeGB';Expression={if ($_.FreeSpace) { [math]::Round($_.FreeSpace / 1GB, 2) } else { 0 }}}
-              ConvertTo-Json -Compress
-            """,
-            errors,
-        )
+        devices_json = []
+
+        # Pure Python removable drive detection (0 child processes)
+        if os.name == "nt":
+            try:
+                import ctypes
+                import shutil
+                bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                    if bitmask & 1:
+                        root = f"{letter}:\\"
+                        drive_type = ctypes.windll.kernel32.GetDriveTypeW(root)
+                        if drive_type == 2:  # DRIVE_REMOVABLE
+                            vol_name_buf = ctypes.create_unicode_buffer(261)
+                            ctypes.windll.kernel32.GetVolumeInformationW(
+                                root, vol_name_buf, ctypes.sizeof(vol_name_buf),
+                                None, None, None, None, 0
+                            )
+                            vol_name = vol_name_buf.value
+                            try:
+                                usage = shutil.disk_usage(root)
+                                size_gb = round(usage.total / (1024**3), 2)
+                                free_gb = round(usage.free / (1024**3), 2)
+                            except Exception:
+                                size_gb, free_gb = 0.0, 0.0
+                            devices_json.append({
+                                "DeviceID": f"{letter}:",
+                                "VolumeName": vol_name,
+                                "SizeGB": size_gb,
+                                "FreeGB": free_gb,
+                            })
+                    bitmask >>= 1
+            except Exception as e:
+                errors.append(f"ctypes removable drive check failed: {e}")
+
+        # Fallback to PowerShell only if ctypes failed with an exception on Windows
+        ctypes_failed = any("ctypes removable drive check failed" in str(e) for e in errors)
+        if not devices_json and os.name == "nt" and ctypes_failed:
+            devices_json = self._run_powershell_json(
+                """
+                Get-CimInstance Win32_LogicalDisk |
+                  Where-Object { $_.DriveType -eq 2 } |
+                  Select-Object DeviceID, VolumeName,
+                    @{Name='SizeGB';Expression={if ($_.Size) { [math]::Round($_.Size / 1GB, 2) } else { 0 }}},
+                    @{Name='FreeGB';Expression={if ($_.FreeSpace) { [math]::Round($_.FreeSpace / 1GB, 2) } else { 0 }}}
+                  ConvertTo-Json -Compress
+                """,
+                errors,
+            )
         devices = []
         current_ids: Set[str] = set()
 
@@ -295,7 +388,11 @@ class SystemMonitorService:
                 "action_type": "usb_insertion",
                 "device": device["name"],
                 "network_activity": 0.0,
-                "details": f"USB device inserted: {device['name']}",
+                "details": {
+                    "summary": f"USB device inserted: {device['name']}",
+                    "device_name": device["name"],
+                    "instance_id": device.get("instance_id", ""),
+                },
             }
             for device in insertions
         ]
@@ -350,7 +447,16 @@ class SystemMonitorService:
                     "action_type": "file_access",
                     "device": platform.node() or "localhost",
                     "network_activity": 0.0,
-                    "details": f"Detected {len(recent_changes)} file changes. Sample: {sample_paths}",
+                    "details": {
+                        "summary": f"Detected {len(recent_changes)} file changes. Sample: {sample_paths}",
+                        "files": [
+                            {
+                                "path": item["path"],
+                                "action": item.get("action", "modified"),
+                            }
+                            for item in recent_changes[:8]
+                        ],
+                    },
                     "behavior_context": {
                         "files": [
                             {
@@ -376,14 +482,38 @@ class SystemMonitorService:
 
     def _collect_network_activity(self, process_index: Dict[int, str]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         errors: List[str] = []
-        connections_json = self._run_powershell_json(
-            """
-            Get-NetTCPConnection -State Established |
-              Select-Object -First 40 LocalAddress, LocalPort, RemoteAddress, RemotePort, OwningProcess |
-              ConvertTo-Json -Compress
-            """,
-            errors,
-        )
+        connections_data: List[Dict[str, Any]] = []
+
+        # Pure Python connection gathering (0 child processes)
+        if psutil is not None:
+            try:
+                for c in psutil.net_connections(kind="tcp"):
+                    if c.status == psutil.CONN_ESTABLISHED and c.raddr:
+                        connections_data.append({
+                            "LocalAddress": c.laddr.ip if c.laddr else "",
+                            "LocalPort": c.laddr.port if c.laddr else 0,
+                            "RemoteAddress": c.raddr.ip,
+                            "RemotePort": c.raddr.port,
+                            "OwningProcess": c.pid or 0,
+                        })
+                        if len(connections_data) >= 40:
+                            break
+            except Exception as exc:
+                errors.append(f"psutil net_connections check failed: {exc}")
+
+        # Fallback to PowerShell only if psutil net_connections check failed with an exception on Windows
+        psutil_net_failed = any("psutil net_connections check failed" in str(e) for e in errors)
+        if not connections_data and os.name == "nt" and psutil_net_failed:
+            connections_data = self._ensure_list(
+                self._run_powershell_json(
+                    """
+                    Get-NetTCPConnection -State Established |
+                      Select-Object -First 40 LocalAddress, LocalPort, RemoteAddress, RemotePort, OwningProcess |
+                      ConvertTo-Json -Compress
+                    """,
+                    errors,
+                )
+            )
 
         connections: List[Dict[str, Any]] = []
         suspicious_connections: List[Dict[str, Any]] = []
@@ -392,7 +522,7 @@ class SystemMonitorService:
         process_counter: Counter = Counter()
         tracked_ip_index: Dict[str, Dict[str, Any]] = {}
 
-        for item in self._ensure_list(connections_json):
+        for item in connections_data:
             pid = self._safe_int(item.get("OwningProcess"))
             process_name = process_index.get(pid or -1, f"PID {pid}" if pid else "Unknown")
             remote_ip = item.get("RemoteAddress") or ""
@@ -469,7 +599,17 @@ class SystemMonitorService:
                     "action_type": "network_spike",
                     "device": platform.node() or "localhost",
                     "network_activity": float(len(connections)),
-                    "details": f"Detected {len(connections)} established TCP connections across {len(remote_ips)} remote IPs",
+                    "details": {
+                        "summary": f"Detected {len(connections)} established TCP connections across {len(remote_ips)} remote IPs",
+                        "connection_count": len(connections),
+                        "remote_ips": list(remote_ips)[:10],
+                    },
+                    "behavior_context": {
+                        "network": {
+                            "connection_count": len(connections),
+                            "remote_ips": list(remote_ips)[:10],
+                        }
+                    },
                 }
             )
         if suspicious_connections and self._should_emit("network_connection_suspicious", now_ts, cooldown_seconds=20):
@@ -502,12 +642,32 @@ class SystemMonitorService:
         db = SessionLocal()
         try:
             system_user = self._ensure_system_user(db)
+            raw_details = event.get("details")
+            if isinstance(raw_details, dict):
+                details_str = json.dumps(raw_details)
+                summary_text = raw_details.get("summary") or event.get("action_type", "")
+            elif isinstance(raw_details, str):
+                try:
+                    parsed = json.loads(raw_details)
+                    if isinstance(parsed, dict):
+                        details_str = raw_details
+                        summary_text = parsed.get("summary") or parsed.get("message") or raw_details
+                    else:
+                        details_str = json.dumps({"summary": raw_details})
+                        summary_text = raw_details
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    details_str = json.dumps({"summary": raw_details})
+                    summary_text = raw_details
+            else:
+                details_str = json.dumps({"summary": str(raw_details or "")})
+                summary_text = str(raw_details or "")
+
             db_activity = models.UserActivity(
                 user_id=system_user.id,
                 action_type=event["action_type"],
                 device=event["device"],
                 network_activity=event.get("network_activity", 0.0),
-                details=encrypt_sensitive_value(event.get("details")),
+                details=encrypt_sensitive_value(details_str),
             )
             db.add(db_activity)
             db.commit()
@@ -520,16 +680,21 @@ class SystemMonitorService:
             db_activity.risk_level = threat_assessment["risk_level"]
             db.add(db_activity)
             db.commit()
+
+            activity_summary = threat_assessment.get("summary") or summary_text or db_activity.action_type
+            now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             activity_msg = {
+                "id": str(uuid.uuid4()),
                 "type": "NEW_ACTIVITY",
+                "timestamp": now_utc,
                 "data": {
                     "user": system_user.username,
                     "action": db_activity.action_type,
                     "network": db_activity.network_activity,
                     "score": threat_assessment["score"],
                     "risk_level": threat_assessment["risk_level"],
-                    "details": threat_assessment.get("summary") or event.get("details") or db_activity.action_type,
-                    "timestamp": db_activity.timestamp.isoformat(),
+                    "details": activity_summary,
+                    "timestamp": now_utc,
                 },
             }
             await self.connection_manager.broadcast(json.dumps(activity_msg), user_id=system_user.id)
@@ -540,26 +705,26 @@ class SystemMonitorService:
                     anomaly_score=threat_assessment["score"],
                     threat_level=threat_assessment["level"],
                     action_taken=threat_assessment.get("recommended_action", "monitor"),
-                    details=encrypt_sensitive_value(
-                        threat_assessment.get("summary") or event.get("details") or db_activity.action_type
-                    ),
+                    details=encrypt_sensitive_value(activity_summary),
                 )
                 db.add(threat_log)
                 db.commit()
+                alert_msg = {
+                    "id": str(uuid.uuid4()),
+                    "type": "THREAT_ALERT",
+                    "timestamp": now_utc,
+                    "data": {
+                        "user": system_user.username,
+                        "score": threat_assessment["score"],
+                        "level": threat_assessment["level"],
+                        "action": db_activity.action_type,
+                        "risk_level": threat_assessment["risk_level"],
+                        "details": activity_summary,
+                        "timestamp": now_utc,
+                    },
+                }
                 await self.connection_manager.broadcast(
-                    json.dumps(
-                        {
-                            "type": "THREAT_ALERT",
-                            "data": {
-                                "user": system_user.username,
-                                "score": threat_assessment["score"],
-                                "level": threat_assessment["level"],
-                                "action": db_activity.action_type,
-                                "risk_level": threat_assessment["risk_level"],
-                                "details": threat_assessment.get("summary") or event.get("details") or db_activity.action_type,
-                            },
-                        }
-                    ),
+                    json.dumps(alert_msg),
                     user_id=system_user.id,
                 )
         finally:
@@ -590,7 +755,13 @@ class SystemMonitorService:
             "action_type": action_type,
             "device": platform.node() or "localhost",
             "network_activity": float(connection["risk_score"]),
-            "details": details,
+            "details": {
+                "summary": details,
+                "process_name": connection.get("process", ""),
+                "remote_ip": connection.get("remote_ip", ""),
+                "remote_port": connection.get("remote_port", 0),
+                "reasons": connection.get("reasons", []),
+            },
             "behavior_context": {
                 "applications": [
                     {
@@ -749,10 +920,9 @@ class SystemMonitorService:
         # Clean script newlines to prevent PowerShell from splitting the command block
         cleaned_script = " ".join(line.strip() for line in script.splitlines() if line.strip())
         try:
-            completed = subprocess.run(
+            from app.process_utils import run_hidden
+            completed = run_hidden(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cleaned_script],
-                capture_output=True,
-                text=True,
                 timeout=10,
                 check=False,
             )

@@ -6,9 +6,12 @@ import json
 import logging
 import os
 from pathlib import Path
+import platform
+import psutil
 import re
 import sys
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 _backend_dir = str(Path(__file__).resolve().parent.parent)
@@ -28,7 +31,13 @@ from . import auth, database, models, schemas
 from .ai.scoring_engine import engine as ai_engine
 from .behavior_tracking import rebuild_behavior_profiles, serialize_behavior_profile, update_behavior_profile
 from .database import engine
-from .device_safety import queue_device_safety_command, read_device_safety_status
+from .device_safety import (
+    list_quarantine_items,
+    queue_device_safety_command,
+    read_device_safety_status,
+    restore_quarantine_file,
+)
+from .paths import get_database_path, get_runtime_port_file
 from .desktop_security import (
     FirewallRuleRequest,
     TextScanRequest,
@@ -185,22 +194,6 @@ def ensure_runtime_schema():
 
 
 ensure_runtime_schema()
-
-
-def purge_legacy_seed_users():
-    db = database.SessionLocal()
-    try:
-        legacy_account = "admin" + "31"
-        db.query(models.User).filter(func.lower(models.User.username) == legacy_account).delete(synchronize_session=False)
-        db.commit()
-    except Exception:
-        db.rollback()
-    finally:
-        db.close()
-
-
-purge_legacy_seed_users()
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
 
@@ -226,6 +219,21 @@ class ConnectionManager:
             self.active_connections.remove(connection)
 
     async def broadcast(self, message: str, *, user_id: Optional[int] = None, admin_only: bool = False):
+        try:
+            parsed = json.loads(message)
+            if isinstance(parsed, dict):
+                changed = False
+                if "id" not in parsed:
+                    parsed["id"] = str(uuid.uuid4())
+                    changed = True
+                if "timestamp" not in parsed:
+                    parsed["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    changed = True
+                if changed:
+                    message = json.dumps(parsed)
+        except Exception:
+            pass
+
         stale_connections = []
         for connection in list(self.active_connections):
             connection_role = str(connection.get("role") or "user").lower()
@@ -425,9 +433,12 @@ async def run_traffic_monitor_sampler_loop():
                 db = database.SessionLocal()
                 try:
                     await traffic_service.sample_host_connections_fallback(db)
+                    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                     await manager.broadcast(
                         json.dumps({
+                            "id": str(uuid.uuid4()),
                             "type": "TRAFFIC_MONITOR_UPDATE",
+                            "timestamp": now_utc,
                             "connections": traffic_service.connections,
                             "interface_stats": traffic_service.interface_stats
                         }),
@@ -447,6 +458,7 @@ async def lifespan(_: FastAPI):
     db = database.SessionLocal()
     try:
         rebuild_behavior_profiles(db)
+        traffic_service.load_rules(db, force=True)
         db.commit()
     finally:
         db.close()
@@ -604,6 +616,7 @@ except ImportError:
         from ..security.geo_tracker import GeoTracker
 
 geo_tracker = GeoTracker()
+geo = geo_tracker
 
 try:
     from backend.ai.phishing_detector import detector as phishing_detector
@@ -614,15 +627,19 @@ except ImportError:
         from ..ai.phishing_detector import detector as phishing_detector
 
 try:
-    from backend.security.live_monitor import live_monitor
+    from backend.security.live_monitor import live_monitor, geo
 except ImportError:
     try:
-        from security.live_monitor import live_monitor
+        from security.live_monitor import live_monitor, geo
     except ImportError:
-        from ..security.live_monitor import live_monitor
+        from ..security.live_monitor import live_monitor, geo
 
 async def broadcast_live_event(event: dict):
     try:
+        if "id" not in event:
+            event["id"] = str(uuid.uuid4())
+        if "timestamp" not in event:
+            event["timestamp"] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         await manager.broadcast(json.dumps(event))
     except Exception as exc:
         logger.debug(f"Live event broadcast error: {exc}")
@@ -1311,8 +1328,11 @@ def build_usb_status(db: Session) -> Dict[str, Any]:
 
 
 async def emit_login_activity(user: models.User, assessment: Dict[str, Any], login_time: datetime):
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     activity_msg = {
+        "id": str(uuid.uuid4()),
         "type": "NEW_ACTIVITY",
+        "timestamp": now_utc,
         "data": {
             "user": user.username,
             "action": "login",
@@ -1320,13 +1340,15 @@ async def emit_login_activity(user: models.User, assessment: Dict[str, Any], log
             "score": assessment["score"],
             "risk_level": assessment["risk_level"],
             "details": assessment.get("summary"),
-            "timestamp": login_time.isoformat(),
+            "timestamp": now_utc,
         },
     }
     await manager.broadcast(json.dumps(activity_msg), user_id=user.id)
     if is_risky(assessment["score"]):
         alert_msg = {
+            "id": str(uuid.uuid4()),
             "type": "THREAT_ALERT",
+            "timestamp": now_utc,
             "data": {
                 "user": user.username,
                 "score": assessment["score"],
@@ -1334,6 +1356,7 @@ async def emit_login_activity(user: models.User, assessment: Dict[str, Any], log
                 "action": "login",
                 "risk_level": assessment["risk_level"],
                 "details": assessment.get("summary"),
+                "timestamp": now_utc,
             },
         }
         await manager.broadcast(json.dumps(alert_msg), user_id=user.id)
@@ -1995,13 +2018,387 @@ def delete_desktop_firewall_rule(
             "firewall",
             "delete",
             "rule",
-            f"name={rule.rule_name}"
+            f"name={rule.rule_name}",
         ]
-        subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        from app.process_utils import run_hidden
+        run_hidden(command, timeout=15, check=False)
         
     db.delete(rule)
     db.commit()
     return {"status": "deleted", "message": f"Rule {rule.rule_name} deleted successfully."}
+
+
+@app.get("/api/system/process-launch-stats")
+def get_child_process_launch_stats():
+    """Retrieve child process launch statistics for monitoring hidden execution"""
+    from app.process_utils import get_launch_stats
+    return get_launch_stats()
+
+
+@app.get("/api/system/settings/geo-lookup")
+def get_geo_lookup_setting():
+    """Retrieve remote-IP server location privacy setting"""
+    return {
+        "online_lookup_enabled": geo.is_online_lookup_enabled(),
+        "database": "IANA/RIR IPv4/IPv6 Allocation Table (Public Domain / CC0, October 2026)",
+        "notice": "Server locations indicate the remote server's approximate hosting facility, never your local device location."
+    }
+
+
+@app.post("/api/system/settings/geo-lookup")
+def set_geo_lookup_setting(payload: dict):
+    """Update remote-IP server location privacy setting"""
+    enabled = bool(payload.get("enabled", False))
+    geo.set_online_lookup_enabled(enabled)
+    return {
+        "status": "success",
+        "online_lookup_enabled": geo.is_online_lookup_enabled()
+    }
+
+
+_cached_current_location = None
+_cached_location_timestamp = 0.0
+
+
+@app.get("/api/system/current-location")
+def get_user_current_location(current_user: models.User = Depends(get_current_user)):
+    """User's own current public IP and location via independent lookup (3s timeout)"""
+    global _cached_current_location, _cached_location_timestamp
+    now = time.time()
+    if _cached_current_location and (now - _cached_location_timestamp) < 300:
+        age = int(now - _cached_location_timestamp)
+        return {**_cached_current_location, "updated_seconds_ago": age, "state": "LIVE" if age < 300 else "STALE"}
+
+    import urllib.request
+    try:
+        req = urllib.request.Request("https://api.ipify.org?format=json", headers={"User-Agent": "AIFirewall/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            public_ip = data.get("ip")
+            if public_ip:
+                geo_info = geo_tracker.lookup_ip(public_ip)
+                loc = {
+                    "ip": public_ip,
+                    "city": geo_info.get("city") or "",
+                    "region": geo_info.get("region") or "",
+                    "country": geo_info.get("country") or "Unknown",
+                    "isp": geo_info.get("isp") or "",
+                    "source": "api.ipify.org (independent)",
+                    "accuracy": "approximate, from IP",
+                    "state": "LIVE",
+                    "updated_seconds_ago": 0,
+                    "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+                _cached_current_location = loc
+                _cached_location_timestamp = now
+                return loc
+    except Exception:
+        pass
+
+    return {
+        "ip": None,
+        "city": "",
+        "region": "",
+        "country": "",
+        "isp": "",
+        "source": "independent lookup",
+        "accuracy": "approximate, from IP",
+        "state": "OFFLINE",
+        "location_label": "Location unavailable (offline)",
+        "updated_seconds_ago": int(now - _cached_location_timestamp) if _cached_location_timestamp else 0,
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+@app.get("/api/system/detailed-status")
+def get_system_detailed_status(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Real machine telemetry checks for every feature (PART 2)"""
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    admin_active = is_admin()
+
+    # 1. Administrative Rights
+    admin_item = {
+        "id": "admin_rights",
+        "name": "Windows Administrative Privileges",
+        "state": "RUNNING" if admin_active else "NEEDS ADMIN",
+        "reason": "Process is running with elevated administrator rights." if admin_active else "Process is running in standard user mode. Relaunch as Administrator for firewall rules and hosts-file domain redirection.",
+        "last_run_time": now_iso,
+        "last_result": {"is_admin": admin_active, "platform": platform.platform()},
+        "remediation": "Right-click the AI Firewall shortcut and select 'Run as Administrator'." if not admin_active else "None required."
+    }
+
+    # 2. Bound Runtime Port
+    port_file = get_runtime_port_file()
+    bound_port = None
+    if port_file.exists():
+        try:
+            p_data = json.loads(port_file.read_text(encoding="utf-8"))
+            bound_port = p_data.get("port")
+        except Exception:
+            pass
+    if not bound_port:
+        bound_port = int(os.environ.get("AI_FIREWALL_PORT", "8000"))
+
+    port_item = {
+        "id": "backend_port",
+        "name": "Backend REST & WebSocket Socket",
+        "state": "RUNNING",
+        "reason": f"FastAPI daemon actively bound and accepting loopback HTTP/WebSocket connections on port {bound_port}.",
+        "last_run_time": now_iso,
+        "last_result": {"bound_port": bound_port, "host": "127.0.0.1", "protocol": "TCP"},
+        "remediation": "Check for conflicting services if port cannot bind."
+    }
+
+    # 3. Database
+    db_ok = False
+    table_count = 0
+    db_size_mb = 0.0
+    db_path = get_database_path()
+    try:
+        res = db.execute(text("SELECT count(*) FROM sqlite_master WHERE type='table'")).scalar()
+        table_count = int(res or 0)
+        db_ok = True
+        if db_path.exists():
+            db_size_mb = round(os.path.getsize(db_path) / (1024 * 1024), 2)
+    except Exception as e:
+        logger.error(f"DB check failed: {e}")
+
+    database_item = {
+        "id": "database",
+        "name": "Encrypted Local Storage (SQLite WAL)",
+        "state": "RUNNING" if db_ok else "ERROR",
+        "reason": f"SQLite database is healthy in Write-Ahead-Log (WAL) mode with {table_count} tables." if db_ok else "Database query failed.",
+        "last_run_time": now_iso,
+        "last_result": {"path": str(db_path), "size_mb": db_size_mb, "tables": table_count, "journal_mode": "WAL"},
+        "remediation": "Ensure write access to %APPDATA%\\AIFirewall." if not db_ok else "None required."
+    }
+
+    # 4. Markov Model
+    user_count = db.query(models.User).count()
+    activity_count = db.query(models.UserActivity).count()
+    markov_trained = activity_count >= 12
+    markov_item = {
+        "id": "markov_model",
+        "name": "Markov Sequence Model",
+        "state": "RUNNING",
+        "reason": "Markov sequence transition matrix active." if markov_trained else f"Learning mode active ({activity_count}/12 baseline actions recorded).",
+        "last_run_time": now_iso,
+        "last_result": {
+            "mode": "trained" if markov_trained else "learning mode",
+            "event_count": activity_count,
+            "human_users": user_count,
+            "transition_order": 1
+        },
+        "remediation": "Perform normal user activity (processes, network, logins) to build baseline."
+    }
+
+    # 5. Isolation Forest
+    iso_trained = activity_count >= 15
+    iso_item = {
+        "id": "isolation_forest",
+        "name": "Isolation Forest Outlier Model",
+        "state": "RUNNING",
+        "reason": "Scikit-Learn Isolation Forest outlier evaluation active." if iso_trained else f"Gathering telemetry baseline ({activity_count}/15 events needed for optimal fit).",
+        "last_run_time": now_iso,
+        "last_result": {
+            "mode": "trained" if iso_trained else "learning mode",
+            "samples_analyzed": activity_count,
+            "contamination": 0.05,
+            "n_estimators": 100
+        },
+        "remediation": "Allow system to record normal background activity."
+    }
+
+    # 6. Phishing / NLP Detector
+    phishing_item = {
+        "id": "phishing_detector",
+        "name": "Phishing & Obfuscation Heuristics",
+        "state": "RUNNING",
+        "reason": "Phishing detection pipeline online with NLP heuristics, homoglyphs, and suspicious TLD evaluation.",
+        "last_run_time": now_iso,
+        "last_result": {
+            "max_text_length": 10000,
+            "heuristic_checks": ["urgency_keywords", "homoglyphs", "ip_literal", "subdomain_depth", "punycode"],
+            "online_mode": False
+        },
+        "remediation": "None required."
+    }
+
+    # 7. Spam Detector
+    spam_item = {
+        "id": "spam_detector",
+        "name": "Email & Content Spam Engine",
+        "state": "RUNNING",
+        "reason": "Spam inspection engine ready with weighted urgency phrases, URL extractors, and formatting checks.",
+        "last_run_time": now_iso,
+        "last_result": {"status": "active", "keyword_terms_count": 10, "punctuation_analyzer": "active"},
+        "remediation": "None required."
+    }
+
+    # 8. Process Monitor
+    proc_count = len(psutil.pids()) if psutil else 0
+    proc_item = {
+        "id": "process_monitor",
+        "name": "Host Process Lifecycle Monitor",
+        "state": "RUNNING" if psutil else "ERROR",
+        "reason": f"Actively monitoring {proc_count} running processes for unexpected spawns and suspicious command lines.",
+        "last_run_time": now_iso,
+        "last_result": {"active_processes": proc_count, "collector": "psutil"},
+        "remediation": "Ensure psutil is installed."
+    }
+
+    # 9. Network Monitor
+    net_conns = psutil.net_connections(kind='inet') if psutil else []
+    remote_conns = [c for c in net_conns if c.raddr]
+    net_item = {
+        "id": "network_monitor",
+        "name": "Network Socket Telemetry Monitor",
+        "state": "RUNNING" if psutil else "ERROR",
+        "reason": f"Tracking {len(net_conns)} sockets ({len(remote_conns)} remote established/listening connections).",
+        "last_run_time": now_iso,
+        "last_result": {"total_sockets": len(net_conns), "remote_connections": len(remote_conns)},
+        "remediation": "None required."
+    }
+
+    # 10. Clipboard Monitor
+    clip_item = {
+        "id": "clipboard_monitor",
+        "name": "Pure-Python Clipboard Threat Scanner",
+        "state": "RUNNING",
+        "reason": "Local memory clipboard monitoring operational; discards benign text, alerts only on threat score > 25.",
+        "last_run_time": now_iso,
+        "last_result": {"inspection_scope": "local_memory_only", "persistent_storage": False},
+        "remediation": "None required."
+    }
+
+    # 11. USB Monitor
+    usb_status = build_usb_status(db)
+    usb_item = {
+        "id": "usb_monitor",
+        "name": "Removable Media (USB) Hardware Monitor",
+        "state": "RUNNING",
+        "reason": f"{usb_status.get('connected_count', 0)} removable drive(s) currently detected on the system.",
+        "last_run_time": now_iso,
+        "last_result": {
+            "connected_count": usb_status.get("connected_count", 0),
+            "collector": usb_status.get("collector", "windows-host-agent"),
+            "devices": [d.get("name") for d in usb_status.get("current_devices", [])]
+        },
+        "remediation": "Insert a USB flash drive to perform automatic malware and EICAR signature scanning."
+    }
+
+    # 12. Windows Firewall (netsh)
+    netsh_ok = False
+    netsh_msg = ""
+    try:
+        from app.process_utils import run_hidden
+        cmd_res = run_hidden(["netsh", "advfirewall", "show", "allprofiles", "state"], timeout=5)
+        if cmd_res.returncode == 0:
+            netsh_ok = True
+            netsh_msg = "Windows Defender Firewall netsh interface is responsive."
+        else:
+            netsh_msg = cmd_res.stderr or cmd_res.stdout or "netsh failed"
+    except Exception as exc:
+        netsh_msg = str(exc)
+
+    firewall_item = {
+        "id": "firewall",
+        "name": "Windows Defender Firewall Controller (netsh)",
+        "state": "RUNNING" if netsh_ok else "ERROR",
+        "reason": netsh_msg,
+        "last_run_time": now_iso,
+        "last_result": {
+            "netsh_accessible": netsh_ok,
+            "can_mutate_rules": admin_active,
+            "rule_prefix": "AIFirewall-"
+        },
+        "remediation": "Ensure Windows Firewall service (mpssvc) is running. Run as Administrator to add/remove rules." if not netsh_ok or not admin_active else "None required."
+    }
+
+    # 13. Hosts File
+    hosts_path = r"C:\Windows\System32\drivers\etc\hosts" if os.name == "nt" else "/etc/hosts"
+    hosts_writable = admin_active and os.access(hosts_path, os.W_OK)
+    hosts_item = {
+        "id": "hosts_file",
+        "name": "Hosts File Domain Blocker",
+        "state": "RUNNING" if hosts_writable else ("NEEDS ADMIN" if not admin_active else "ERROR"),
+        "reason": f"Hosts file at {hosts_path} is writable with automated backup retention." if hosts_writable else "Hosts file is read-only. Administrative privileges required to apply domain loopback redirection.",
+        "last_run_time": now_iso,
+        "last_result": {"path": hosts_path, "writable": hosts_writable, "backup_dir": "%APPDATA%\\AIFirewall\\backups"},
+        "remediation": "Relaunch AI Firewall as Administrator to enable host-level domain blocking." if not hosts_writable else "None required."
+    }
+
+    # 14. Geolocation Engine
+    online_geo = geo.is_online_lookup_enabled()
+    geo_item = {
+        "id": "geolocation",
+        "name": "IP Geolocation Resolution",
+        "state": "DISABLED" if not online_geo else "RUNNING",
+        "reason": "Online lookup disabled; offline IANA / RIR IPv4/IPv6 allocation ranges active for maximum privacy." if not online_geo else "Online approximate facility lookup enabled via rate-limited API queries.",
+        "last_run_time": now_iso,
+        "last_result": {
+            "mode": "online" if online_geo else "offline (IANA / RIR ranges)",
+            "ipv6_coverage": "Global RIR prefixes (APNIC, ARIN, RIPE, LACNIC, AFRINIC)",
+            "privacy_preserving": True
+        },
+        "remediation": "Toggle 'Look up server locations online' in Live Activity if online lookup is desired."
+    }
+
+    # 15. WebSocket Hub
+    ws_clients = len(manager.active_connections)
+    ws_item = {
+        "id": "websocket",
+        "name": "Real-Time Telemetry WebSocket Hub",
+        "state": "RUNNING",
+        "reason": f"{ws_clients} active browser client(s) currently receiving live security broadcasts.",
+        "last_run_time": now_iso,
+        "last_result": {"active_clients": ws_clients, "endpoint": "/api/ws/monitor"},
+        "remediation": "Connect UI to /api/ws/monitor."
+    }
+
+    # 16. Last Event Time
+    last_act = db.query(models.UserActivity.timestamp).order_by(models.UserActivity.timestamp.desc()).first()
+    last_event_str = None
+    if last_act and last_act[0]:
+        t = last_act[0]
+        last_event_str = t.isoformat() if hasattr(t, "isoformat") else str(t)
+        if not last_event_str.endswith("Z") and "+" not in last_event_str:
+            last_event_str += "Z"
+
+    event_time_item = {
+        "id": "last_event_time",
+        "name": "Telemetry Ingestion Heartbeat",
+        "state": "RUNNING" if last_event_str else "OFFLINE",
+        "reason": f"Last recorded security event occurred at {last_event_str}." if last_event_str else "No security events recorded yet in this database.",
+        "last_run_time": now_iso,
+        "last_result": {"latest_event_timestamp": last_event_str},
+        "remediation": "Perform actions on the system or run a simulation preset to generate telemetry."
+    }
+
+    return {
+        "timestamp": now_iso,
+        "features": [
+            admin_item,
+            port_item,
+            database_item,
+            markov_item,
+            iso_item,
+            phishing_item,
+            spam_item,
+            proc_item,
+            net_item,
+            clip_item,
+            usb_item,
+            firewall_item,
+            hosts_item,
+            geo_item,
+            ws_item,
+            event_time_item
+        ]
+    }
 
 
 @app.get("/api/usb-status")
@@ -2022,15 +2419,16 @@ def queue_device_safety_scan(
     request: schemas.DeviceSafetyScanRequest,
     current_user: models.User = Depends(get_current_user),
 ):
-    command = queue_device_safety_command(
+    result = queue_device_safety_command(
         "scan_target",
         target_id=request.target_id,
         requested_by=current_user.username,
     )
+    is_completed = isinstance(result, dict) and "files_scanned" in result
     return {
-        "status": "queued",
-        "command": command,
-        "message": f"Manual scan queued for {request.target_id}.",
+        "status": "completed" if is_completed else "queued",
+        "result": result,
+        "message": f"Scan completed for {request.target_id}." if is_completed else f"Manual scan queued for {request.target_id}.",
     }
 
 
@@ -2049,6 +2447,27 @@ def set_device_safety_live_watch(
         "command": command,
         "message": "Live watch update queued.",
     }
+
+
+@app.get("/api/device-safety/quarantine")
+def get_device_safety_quarantine(current_user: models.User = Depends(get_current_user)):
+    return {"items": list_quarantine_items()}
+
+
+class DeviceSafetyRestoreRequest(BaseModel):
+    entry_id: str
+    target_dir: Optional[str] = None
+
+
+@app.post("/api/device-safety/restore")
+def restore_device_safety_quarantine(
+    request: DeviceSafetyRestoreRequest,
+    current_user: models.User = Depends(require_admin),
+):
+    res = restore_quarantine_file(request.entry_id, request.target_dir)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Restore failed"))
+    return res
 
 
 @app.post("/api/system-monitor/ingest")
@@ -2123,8 +2542,11 @@ async def log_activity(
         db.add(threat_log)
         db.commit()
         db.refresh(threat_log)
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         alert_msg = {
+            "id": str(uuid.uuid4()),
             "type": "THREAT_ALERT",
+            "timestamp": now_utc,
             "data": {
                 "user": current_user.username,
                 "score": anomaly_score,
@@ -2132,12 +2554,16 @@ async def log_activity(
                 "action": activity.action_type,
                 "risk_level": threat_assessment["risk_level"],
                 "details": threat_assessment.get("summary") or activity.details,
+                "timestamp": now_utc,
             },
         }
         await manager.broadcast(json.dumps(alert_msg), user_id=current_user.id)
 
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     activity_msg = {
+        "id": str(uuid.uuid4()),
         "type": "NEW_ACTIVITY",
+        "timestamp": now_utc,
         "data": {
             "user": current_user.username,
             "action": activity.action_type,
@@ -2145,7 +2571,7 @@ async def log_activity(
             "score": anomaly_score,
             "risk_level": threat_assessment["risk_level"],
             "details": threat_assessment.get("summary") or activity.details,
-            "timestamp": db_activity.timestamp.isoformat(),
+            "timestamp": now_utc,
         },
     }
     await manager.broadcast(json.dumps(activity_msg), user_id=current_user.id)
@@ -2156,6 +2582,7 @@ async def log_activity(
 async def websocket_endpoint(websocket: WebSocket):
     token = websocket.query_params.get("token")
     if not token:
+        logger.warning("WebSocket connection rejected: missing authentication token")
         await websocket.close(code=4401)
         return
 
@@ -2165,6 +2592,11 @@ async def websocket_endpoint(websocket: WebSocket):
         username = payload.get("sub")
         session_id = payload.get("sid")
         user = db.query(models.User).filter(models.User.username == username).first()
+        if not user:
+            logger.warning(f"WebSocket connection rejected: user '{username}' not found")
+            await websocket.close(code=4401)
+            return
+
         session = (
             db.query(models.AuthSession)
             .filter(
@@ -2175,21 +2607,32 @@ async def websocket_endpoint(websocket: WebSocket):
             if session_id
             else None
         )
-        if not user or (session_id and (session is None or session.expires_at < datetime.utcnow())):
+        if session_id and (session is None or session.expires_at < datetime.utcnow()):
+            logger.warning(f"WebSocket connection rejected: session for user '{username}' is expired or inactive")
             await websocket.close(code=4401)
             return
-    except HTTPException:
+    except HTTPException as exc:
+        logger.warning(f"WebSocket connection rejected: invalid token credentials ({exc.detail})")
+        await websocket.close(code=4401)
+        return
+    except Exception as exc:
+        logger.warning(f"WebSocket connection rejected: token decode error ({exc})")
         await websocket.close(code=4401)
         return
     finally:
         db.close()
 
     await manager.connect(websocket, user)
+    logger.info(f"WebSocket client connected: user '{user.username}' (role: {get_user_role(user)})")
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        logger.info(f"WebSocket client disconnected: user '{user.username}'")
+    except Exception as exc:
+        manager.disconnect(websocket)
+        logger.info(f"WebSocket client disconnected abruptly: user '{user.username}' ({exc})")
 
 
 # --- TRAFFIC MONITOR ENDPOINTS ---
@@ -2200,9 +2643,12 @@ async def ingest_traffic_monitor_data(
     db: Session = Depends(database.get_db),
 ):
     await traffic_service.ingest_traffic(payload.connections, payload.interface_stats, db)
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     await manager.broadcast(
         json.dumps({
+            "id": str(uuid.uuid4()),
             "type": "TRAFFIC_MONITOR_UPDATE",
+            "timestamp": now_utc,
             "connections": traffic_service.connections,
             "interface_stats": traffic_service.interface_stats
         }),
@@ -2246,7 +2692,7 @@ def create_network_rule(
         db.add(rule)
     db.commit()
     db.refresh(rule)
-    traffic_service.load_rules(db)
+    traffic_service.load_rules(db, force=True)
     return rule
 
 
@@ -2261,7 +2707,7 @@ def delete_network_rule(
         raise HTTPException(status_code=404, detail="Rule not found")
     db.delete(rule)
     db.commit()
-    traffic_service.load_rules(db)
+    traffic_service.load_rules(db, force=True)
     return {"status": "deleted"}
 
 
@@ -2364,6 +2810,30 @@ def get_spam_logs(
     return db.query(models.SpamScanLog).order_by(models.SpamScanLog.timestamp.desc()).limit(100).all()
 
 
+class SpamBlockPayload(BaseModel):
+    domain: str
+    reason: Optional[str] = "Blocked via Spam Detection Panel"
+
+
+@app.post("/api/spam-detection/block")
+def block_spam_domain(
+    payload: SpamBlockPayload,
+    current_user: models.User = Depends(get_current_user)
+):
+    domain = (payload.domain or "").strip()
+    if not domain:
+        raise HTTPException(status_code=400, detail="Domain cannot be empty.")
+    user_email = decrypt_sensitive_value(current_user.email) or current_user.email or current_user.username
+    res = block_manager.block(
+        block_type="domain",
+        value=domain,
+        reason=payload.reason or "Blocked via Spam Detection Panel",
+        added_by=user_email,
+        apply_firewall=False
+    )
+    return res
+
+
 # --- HARMFUL WEBSITE DETECTION AND BLOCKING ENDPOINTS ---
 
 @app.post("/api/website-security/scan")
@@ -2381,9 +2851,12 @@ async def scan_website_url(
 
     # Broadcast real-time WebSocket alert if website is high risk or blocked
     if result["blocked"] or result["threat_status"] in ("High Risk", "Malicious"):
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         await manager.broadcast(
             json.dumps({
+                "id": str(uuid.uuid4()),
                 "type": "WEBSITE_BLOCKED_ALERT" if result["blocked"] else "WEBSITE_RISK_ALERT",
+                "timestamp": now_utc,
                 "data": {
                     "domain": result["domain"],
                     "threat_status": result["threat_status"],

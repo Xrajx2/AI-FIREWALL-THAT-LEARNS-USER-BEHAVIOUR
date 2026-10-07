@@ -444,9 +444,12 @@ export default function Login() {
                 error={fieldErrors.identifier}
               >
                 <input
+                  type="text"
+                  name="identifier"
                   value={loginForm.identifier}
                   onChange={(e) => setLoginForm({ ...loginForm, identifier: e.target.value })}
                   className="auth-input text-white"
+                  placeholder="Username or email"
                   autoFocus
                 />
               </FloatingField>

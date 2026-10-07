@@ -10,7 +10,7 @@ An open-source, local-first Windows desktop cybersecurity application that combi
 
 ## Technical Overview & How It Works
 
-AI Firewall takes an honest, practical approach to anomaly detection without inflated claims of "deep learning" or "military grade" intelligence:
+AI Firewall takes an honest, practical approach to anomaly detection with transparent, verifiable models:
 
 1. **Markov Sequence Modeling**:
    User actions (file operations, process executions, network requests, logins) are modeled as sequential states. A first-order Markov chain tracks transition probabilities between consecutive events, calculating likelihood scores to detect unusual activity sequences.
@@ -22,6 +22,10 @@ AI Firewall takes an honest, practical approach to anomaly detection without inf
    Pure-Python scanner inspecting file headers, entropy, double extensions, suspicious script patterns, and standard test signatures (EICAR). Automatically quarantines flagged files into `%APPDATA%\AIFirewall\quarantine\`.
 5. **Windows Host Traffic Control**:
    Directly manages Windows Defender Firewall inbound and outbound rules using `netsh advfirewall`, tagging all rules with the `AIFirewall-` prefix. Enforces domain blocking by adding loopback entries (`127.0.0.1`) to the Windows `hosts` file with automatic backups and DNS cache flushing.
+6. **Clipboard & Background Checks**:
+   Clipboard content is inspected locally in memory using pure-Python Windows APIs solely to detect potential phishing URLs or suspicious manipulation patterns. Raw clipboard text is never stored in the database, never written to disk or diagnostic logs, and never sent off your PC. If a severe phishing indicator is identified (threat score > 25), a short truncated preview (up to 100 characters) is temporarily dispatched to the local Live Activity dashboard over a localhost WebSocket. If no threat is found, the content is discarded immediately in memory. Periodic system and behavioral checks operate continuously in the background every 30 seconds.
+7. **Remote-IP Location Privacy & Offline Lookups**:
+   The Live Activity monitor inspects active network connections locally. By default, online IP resolution is completely disabled ("Look up server locations online" is OFF). When disabled or offline, approximate locations are resolved via a bundled offline database (derived from IANA / Regional Internet Registries allocations, Public Domain / CC0 license, October 2026), or displayed as raw IP only. If the user explicitly opts in, external HTTP queries to `ip-api.com` resolve the remote server's approximate facility location (never your local device location); lookups are rate-limited to 1 request per second, cached locally for 24 hours, and run asynchronously without blocking the live event feed.
 
 ---
 
@@ -30,7 +34,7 @@ AI Firewall takes an honest, practical approach to anomaly detection without inf
 - **Desktop Shell**: Electron 39 (Windows x64)
 - **User Interface**: React 19 + Tailwind CSS + Vite 8
 - **Backend API**: Python 3.14 + FastAPI (bundled into a self-contained one-folder binary via PyInstaller)
-- **Local Storage**: SQLite with WAL mode, encrypted fields via cryptography / Fernet, and zero external daemons (no Docker, no Redis, no Celery, no PostgreSQL)
+- **Local Storage**: SQLite with WAL mode, encrypted fields via cryptography / Fernet, and zero external daemons (no external database engines, background brokers, or containers required)
 - **Secret Protection**: Fernet database keys and JWT secrets are generated locally and encrypted using the **Windows Data Protection API (DPAPI)**
 - **Process Lifecycle**: Managed via a zero-CPU Windows kernel watchdog (`OpenProcess` with `SYNCHRONIZE` + `WaitForSingleObject`) that terminates the backend immediately if the UI process closes
 
@@ -47,7 +51,7 @@ AI Firewall takes an honest, practical approach to anomaly detection without inf
 
 ## Installation & Setup
 
-1. Download `AI-Firewall-Setup-1.0.0.exe` from the latest release.
+1. Download [AI-Firewall-Setup-1.0.0.exe](https://github.com/Xrajx2/AI-FIREWALL-THAT-LEARNS-USER-BEHAVIOUR/releases/download/v1.0.0-beta.2/AI-Firewall-Setup-1.0.0.exe) (SHA-256: `D27886F3A187D4AC22EBE7954C454AFAFC4AAFAC228CC8CAC7D3C47D53043282`).
 2. Run the installer. When the Windows User Account Control (UAC) prompt appears, click **Yes** to allow elevation.
 3. The installer installs the program to:
    ```
@@ -126,6 +130,23 @@ To cleanly remove AI Firewall:
    - Remove all Windows Firewall rules prefixed with `AIFirewall-`.
    - Flush the Windows DNS resolver cache.
    - Ask whether you wish to retain or delete `%APPDATA%\AIFirewall\` (database, logs, and quarantine).
+
+---
+
+## Honest Technical Boundaries & Operational Limits
+
+1. **Hosts-File Domain Blocking Limits**:
+   - Blocks domains by resolving them to `127.0.0.1` in `%WINDIR%\System32\drivers\etc\hosts`.
+   - Modern web browsers with **Secure DNS (DNS over HTTPS / DoH)** bypass the Windows OS resolver and query external resolvers directly over encrypted HTTPS.
+   - Accessing a destination server directly by IP address bypasses DNS-based blocking entirely.
+2. **Windows Defender Firewall Loopback Limitation**:
+   - The Windows Filtering Platform (WFP) and Windows Defender Firewall do not filter local loopback (`127.0.0.1` / `::1`) traffic. Rules apply strictly to external network interfaces.
+3. **Approximate Geolocation**:
+   - Location is estimated from public IPv4/IPv6 blocks (IANA/RIR allocations) and independent queries (`api.ipify.org` with a 3s timeout). It reflects regional ISP routing centers, not device GPS coordinates. When disconnected, status displays `Location unavailable (offline)`.
+4. **Administrator Privilege Requirement**:
+   - Modifying Windows Defender Firewall rules (`netsh`), updating the system `hosts` file, and terminating rogue processes require local Administrator rights (`requireAdministrator`).
+5. **Windows SmartScreen Steps**:
+   - Initial execution triggers an unrecognized publisher prompt due to the lack of a commercial EV certificate. Users must click **More info** $\to$ **Run anyway** and grant UAC elevation.
 
 ---
 

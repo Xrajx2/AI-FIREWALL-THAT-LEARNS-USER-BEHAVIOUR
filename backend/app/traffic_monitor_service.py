@@ -19,12 +19,20 @@ class TrafficMonitorService:
         self.reputation_cache: Dict[str, Dict[str, Any]] = {}
         self.blocked_ips: Set[str] = set()
         self.last_ingest_time: float = 0.0
+        self.last_rules_refresh: float = 0.0
+        self._rules_loaded: bool = False
         self._lock = asyncio.Lock()
 
-    def load_rules(self, db: Session):
+    def load_rules(self, db: Session, force: bool = False):
+        import time
+        now = time.time()
+        if not force and self._rules_loaded and (now - self.last_rules_refresh < 300.0):
+            return
         try:
             rules = db.query(models.NetworkTrafficRule).filter(models.NetworkTrafficRule.action == "block").all()
             self.blocked_ips = {r.ip_address for r in rules}
+            self.last_rules_refresh = now
+            self._rules_loaded = True
             logger.info(f"Loaded {len(self.blocked_ips)} blocked IPs from database.")
         except Exception as e:
             logger.error(f"Error loading traffic rules: {e}")
@@ -33,7 +41,7 @@ class TrafficMonitorService:
         import time
         self.last_ingest_time = time.time()
         async with self._lock:
-            # Refresh local blocked list in case rules changed
+            # Refresh local blocked list if interval elapsed or not yet loaded
             self.load_rules(db)
 
             processed_connections = []

@@ -55,6 +55,7 @@ backups/
 runtime_port.json
 backend/runtime/
 *.bak
+selftest_report_*.txt
 
 # IDE and OS metadata
 .vscode/

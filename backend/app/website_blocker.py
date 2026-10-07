@@ -307,12 +307,13 @@ class WebsiteBlockerEngine:
 
     def _flush_dns_cache(self):
         try:
+            from app.process_utils import run_hidden
             if "win" in self.os_type:
-                subprocess.run(["ipconfig", "/flushdns"], capture_output=True, text=True, check=False)
+                run_hidden(["ipconfig", "/flushdns"], timeout=5, check=False)
             elif "darwin" in self.os_type:
-                subprocess.run(["killall", "-HUP", "mDNSResponder"], capture_output=True, check=False)
+                run_hidden(["killall", "-HUP", "mDNSResponder"], timeout=5, check=False)
             else:
-                subprocess.run(["systemd-resolve", "--flush-caches"], capture_output=True, check=False)
+                run_hidden(["systemd-resolve", "--flush-caches"], timeout=5, check=False)
         except Exception as e:
             logger.warning(f"DNS cache flush notice (non-fatal): {e}")
 
@@ -321,8 +322,12 @@ class WebsiteBlockerEngine:
             return
         rule_name = f"AIFirewall-BlockDomain-{domain.replace('.', '-')}"
         try:
-            cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=out action=block remoteip={domain}'
-            subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+            from app.process_utils import run_hidden
+            run_hidden(
+                ["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule_name}", "dir=out", "action=block", f"remoteip={domain}"],
+                timeout=10,
+                check=False,
+            )
         except Exception:
             pass
 
@@ -331,8 +336,12 @@ class WebsiteBlockerEngine:
             return
         rule_name = f"AIFirewall-BlockDomain-{domain.replace('.', '-')}"
         try:
-            cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
-            subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+            from app.process_utils import run_hidden
+            run_hidden(
+                ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"],
+                timeout=10,
+                check=False,
+            )
         except Exception:
             pass
 

@@ -1,11 +1,12 @@
-# AI Firewall v1.0.0 Release Notes
+# AI Firewall v1.0.0 Beta 2 Release Notes
 
-**Release Date:** October 4, 2026  
-**Artifact:** `AI-Firewall-Setup-1.0.0.exe`  
+**Release Date:** October 7, 2026  
+**Tag:** `v1.0.0-beta.2`  
+**Artifact:** [AI-Firewall-Setup-1.0.0.exe](https://github.com/Xrajx2/AI-FIREWALL-THAT-LEARNS-USER-BEHAVIOUR/releases/download/v1.0.0-beta.2/AI-Firewall-Setup-1.0.0.exe)  
 **Target Platform:** Windows 10 / Windows 11 (64-bit)  
 **SHA-256 Checksum:**  
 ```
-8D2938FC619280A0F764E0D68B48207604F55490999B6760B1BDC435A2C679E8
+D27886F3A187D4AC22EBE7954C454AFAFC4AAFAC228CC8CAC7D3C47D53043282
 ```
 
 ---
@@ -29,7 +30,7 @@
 1. Download **`AI-Firewall-Setup-1.0.0.exe`** and the checksum file **`AI-Firewall-Setup-1.0.0.exe.sha256.txt`**.
 2. Verify the SHA-256 checksum in PowerShell:
    ```powershell
-   (Get-FileHash -Algorithm SHA256 .\AI-Firewall-Setup-1.0.0.exe).Hash -eq "8D2938FC619280A0F764E0D68B48207604F55490999B6760B1BDC435A2C679E8"
+   (Get-FileHash -Algorithm SHA256 .\AI-Firewall-Setup-1.0.0.exe).Hash -eq "D27886F3A187D4AC22EBE7954C454AFAFC4AAFAC228CC8CAC7D3C47D53043282"
    ```
 3. Run `AI-Firewall-Setup-1.0.0.exe`.
 4. Accept the Windows User Account Control (UAC) prompt to allow Administrator elevation.
@@ -43,7 +44,9 @@
 ## Known Limitations & Considerations
 
 1. **Administrator Rights Mandatory**: The desktop application requires Administrator privileges to interact with `netsh advfirewall`, edit the Windows `hosts` file, and terminate rogue processes. Declining UAC elevation will prevent the application from opening.
-2. **SmartScreen Notice**: Because this open-source build is not code-signed with a paid EV certificate, Windows Defender SmartScreen will display an initial warning on first execution.
-3. **Antivirus Heuristic Detections**: Interacting with Windows firewall rules and the system `hosts` file can trigger heuristic alerts in certain third-party antivirus software. The source code is completely open for audit and verification.
-4. **Offline IP Geolocation**: IP geolocation lookups enforce a 3-second timeout and cache responses for 24 hours. When offline, geolocation returns `"Unknown"` gracefully without interrupting login or protection routines.
-5. **Academic Disclaimer**: AI Firewall is an educational and demonstration project exploring host-level behavioral telemetry and host defense scripting. It does not replace enterprise-grade commercial firewalls or EDR agents.
+2. **Hosts File & Secure DNS Limitation**: Domain blocking maps hostnames to `127.0.0.1` in `%WINDIR%\System32\drivers\etc\hosts`. Browsers using Secure DNS (DNS over HTTPS / DoH) bypass the OS resolver, and accessing destination servers directly by IP address bypasses DNS resolution entirely.
+3. **Windows Firewall Loopback Boundary**: The Windows Filtering Platform and Windows Defender Firewall do not filter local loopback (`127.0.0.1` / `::1`) traffic. Firewall rules apply strictly to external network interfaces.
+4. **SmartScreen Notice**: Because this open-source build is not code-signed with a paid EV certificate, Windows Defender SmartScreen will display an initial warning on first execution.
+5. **Antivirus Heuristic Detections**: Interacting with Windows firewall rules and the system `hosts` file can trigger heuristic alerts in certain third-party antivirus software. The source code is completely open for audit and verification.
+6. **Offline IP Geolocation**: IP geolocation lookups enforce a 3-second timeout and cache responses for 24 hours. When offline, geolocation returns `"Unknown"` gracefully without interrupting login or protection routines.
+7. **Academic Disclaimer**: AI Firewall is an educational and demonstration project exploring host-level behavioral telemetry and host defense scripting. It does not replace enterprise-grade commercial firewalls or EDR agents.

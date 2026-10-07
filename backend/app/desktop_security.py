@@ -53,6 +53,11 @@ class DesktopSecurityService:
             },
             "processes": process_snapshot,
             "traffic": traffic_snapshot,
+            "scanners": {
+                "active_count": 4,
+                "status": "Active (4 engines)",
+                "engines": ["Email/Spam Heuristics", "Phishing URL Analysis", "Clipboard Threat Guard", "Process Classifier"],
+            },
             "threat_history": self._build_threat_history(process_snapshot, traffic_snapshot),
             "resource_mode": {
                 "poll_interval_seconds": 3,
@@ -267,7 +272,8 @@ class DesktopSecurityService:
             f"program={app_path}",
             "enable=yes",
         ]
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        from app.process_utils import run_hidden
+        completed = run_hidden(command, timeout=15, check=False)
         return {
             "status": "applied" if completed.returncode == 0 else "failed",
             "rule_name": rule_name,

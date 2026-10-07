@@ -86,7 +86,11 @@ class TrafficController:
                     cmd.append(f'localport={local_port}')
                 if remote_ip != 'any':
                     cmd.append(f'remoteip={remote_ip}')
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                try:
+                    from app.process_utils import run_hidden
+                except ImportError:
+                    from backend.app.process_utils import run_hidden
+                result = run_hidden(cmd, timeout=10)
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or '').lower()
                     if 'requires elevation' in err or 'access is denied' in err or 'run as administrator' in err:
@@ -131,11 +135,16 @@ class TrafficController:
             if rule[1] == 1 and not is_admin_flag:
                 return {'success': False, 'error': 'This rule is admin-locked. Contact your administrator.'}
 
+            try:
+                from app.process_utils import run_hidden
+            except ImportError:
+                from backend.app.process_utils import run_hidden
+
             for d in ['IN', 'OUT']:
                 name = f"AIFirewall-{rule_name}-{d}"
-                result = subprocess.run(
+                result = run_hidden(
                     ['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={name}'],
-                    capture_output=True, text=True, timeout=10
+                    timeout=10
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or '').lower()

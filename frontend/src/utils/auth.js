@@ -37,7 +37,11 @@ export const normalizeRole = (role) => String(role || 'user').trim().toLowerCase
 export const isSessionExpired = () => {
   const expiresAt = getStoredExpiry();
   if (!expiresAt) return false;
-  const parsed = new Date(expiresAt);
+  let dateStr = String(expiresAt).trim();
+  if (dateStr && !dateStr.endsWith('Z') && !dateStr.includes('+') && !dateStr.slice(10).includes('-')) {
+    dateStr += 'Z';
+  }
+  const parsed = new Date(dateStr);
   if (Number.isNaN(parsed.getTime())) return false;
   return parsed.getTime() <= Date.now();
 };

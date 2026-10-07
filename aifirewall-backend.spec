@@ -2,15 +2,18 @@
 import os
 import sys
 
+spec_dir = globals().get('SPECPATH') or (os.path.dirname(os.path.abspath(SPEC)) if 'SPEC' in globals() else os.path.abspath('.'))
+
 datas = []
-if os.path.exists('backend/security/malware_signatures.json'):
-    datas.append(('backend/security/malware_signatures.json', 'backend/security'))
+sig_path = os.path.join(spec_dir, 'backend', 'security', 'malware_signatures.json')
+if os.path.exists(sig_path):
+    datas.append((sig_path, 'backend/security'))
 
 # aifirewall.db is intentionally excluded - DB is auto-created in %APPDATA%\AIFirewall
 
 a = Analysis(
-    ['backend/main.py'],
-    pathex=['.', 'backend'],
+    [os.path.join(spec_dir, 'backend', 'main.py')],
+    pathex=[spec_dir, os.path.join(spec_dir, 'backend')],
     binaries=[],
     datas=datas,
     hiddenimports=[
@@ -40,13 +43,13 @@ a = Analysis(
         'sqlalchemy.dialects.sqlite',
         'jose',
         'jose.jwt',
-        'win32crypt',
         'cryptography',
         'cryptography.fernet',
         'requests',
         'fastapi',
         'starlette',
         'pydantic',
+        'app.process_utils',
     ],
     hookspath=[],
     hooksconfig={},

@@ -128,6 +128,14 @@ function App() {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/system-status"
+            element={
+              <ProtectedRoute>
+                <Dashboard defaultTab="systemStatus" />
+              </ProtectedRoute>
+            }
+          />
           <Route path="/" element={<RootRedirect />} />
         </Routes>
       </Router>

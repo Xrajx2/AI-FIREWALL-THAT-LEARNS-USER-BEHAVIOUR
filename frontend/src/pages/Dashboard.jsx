@@ -14,13 +14,13 @@ import AlertsPanel from '../components/AlertsPanel';
 import DeviceSafetyPanel from '../components/DeviceSafetyPanel';
 import DesktopSecurityPanel from '../components/DesktopSecurityPanel';
 import WebsiteSecurityPanel from '../components/WebsiteSecurityPanel';
-import UsersPanel from '../components/UsersPanel';
 import SimulationPanel from '../components/SimulationPanel';
+import SystemStatus from './SystemStatus';
 import { getStoredUser, isAdminUser, buildWsUrl, getAuthToken } from '../utils/auth';
 import { normalizeRiskLevel } from '../utils/risk';
 
-const ADMIN_TABS = ['overview', 'trafficControl', 'accessLogs', 'phishing', 'blocks', 'desktopSecurity', 'websiteSecurity', 'live', 'trafficMonitor', 'spamDetection', 'alerts', 'deviceSafety', 'users', 'simulation'];
-const USER_TABS = ['overview', 'trafficControl', 'accessLogs', 'phishing', 'websiteSecurity', 'live', 'trafficMonitor', 'spamDetection', 'alerts', 'deviceSafety'];
+const ADMIN_TABS = ['overview', 'systemStatus', 'trafficControl', 'accessLogs', 'phishing', 'blocks', 'desktopSecurity', 'websiteSecurity', 'live', 'trafficMonitor', 'spamDetection', 'alerts', 'deviceSafety', 'users', 'simulation'];
+const USER_TABS = ['overview', 'systemStatus', 'trafficControl', 'accessLogs', 'phishing', 'websiteSecurity', 'live', 'trafficMonitor', 'spamDetection', 'alerts', 'deviceSafety'];
 
 
 
@@ -162,6 +162,7 @@ export default function Dashboard({ defaultTab = 'overview' }) {
           )}
           {accessInfo && <AccessInfo accessInfo={accessInfo} />}
           {visibleTab === 'overview' && <Overview />}
+          {visibleTab === 'systemStatus' && <SystemStatus />}
           {visibleTab === 'trafficControl' && <TrafficControlPanel />}
           {visibleTab === 'accessLogs' && <AccessLogsPanel />}
           {visibleTab === 'phishing' && <PhishingCheckerPanel />}

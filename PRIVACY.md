@@ -6,15 +6,17 @@ AI Firewall is designed with a strict **local-first privacy architecture**. All 
 
 ## 1. What Data Leaves Your Machine?
 
-**The only outbound network request initiated by the application is for public IP geolocation lookups:**
-- **Service Used:** `http://ip-api.com/json/{ip}`
-- **Condition:** Occurs only when external, public IP addresses are observed in active network connections or logged security events.
-- **Exclusions:**
-  - Private and loopback IP addresses (`127.0.0.1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are **never** queried and are skipped immediately.
-  - Lookups are strictly limited by a **3-second timeout**. If the network is unavailable or the lookup times out, the application falls back safely to `"unknown"` without blocking execution.
-- **Local Caching:** IP geolocation responses are cached locally in the SQLite database for 24 hours. The IP addresses are hashed/encrypted prior to storage, preventing plain-text IP retention. Repeated observations of the same IP do not trigger new external network requests.
+AI Firewall operates with an offline-first privacy model. **By default, no network requests are sent outside your local machine.**
 
-**No other telemetry, usage analytics, personal data, crash reports, or logs are transmitted to any third party or remote server.**
+### Remote IP Geolocation (Optional, Disabled by Default)
+- **Default State:** **OFF** (the "Look up server locations online" toggle on the Live Activity page is unchecked by default).
+- **What is Sent:** If and only if the user explicitly enables the "Look up server locations online" toggle, the remote public IP addresses of active established external network connections are queried against `http://ip-api.com/json/{ip}`.
+- **Purpose & Display:** Lookups resolve the **approximate hosting location of the remote server** (e.g., city and country of the remote endpoint). The UI explicitly identifies this as the remote server's approximate facility location, never your local device location.
+- **Offline Fallback & Bundled Database:** When online lookups are disabled (or when the computer is offline), AI Firewall queries a small bundled offline IP range table derived from public IANA and Regional Internet Registry (RIR) allocations (Public Domain / CC0 license, October 2026). If an IP is not found in the offline table, only the raw remote IP is displayed without any location label.
+- **Rate-Limiting & Caching:** Online queries are rate-limited to a minimum interval of 1 second between requests and run asynchronously so the live activity feed is never blocked or stalled. Responses are cached locally in SQLite for 24 hours to prevent repeated external lookups.
+- **Exclusions:** Private and loopback IP addresses (`127.0.0.1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `::1`) are **never** queried online.
+
+**No other telemetry, usage analytics, personal data, crash reports, browsing history, or logs are transmitted to any third party or remote server.**
 
 ---
 
@@ -33,7 +35,13 @@ This directory contains:
 
 ---
 
-## 3. Data Deletion & Uninstallation
+## 3. Clipboard & Background Checks
+
+Clipboard content is inspected locally in memory using pure-Python Windows APIs solely to detect potential phishing URLs or suspicious manipulation patterns. Raw clipboard text is never stored in the database, never written to disk or diagnostic logs, and never sent off your PC. If and only if a severe phishing indicator is identified (threat score > 25), a short truncated preview (up to 100 characters) is temporarily dispatched to the local Live Activity dashboard over a localhost WebSocket. If no threat is found, the content is discarded immediately in memory. Periodic system and behavioral checks operate continuously in the background every 30 seconds.
+
+---
+
+## 4. Data Deletion & Uninstallation
 
 - During standard uninstallation via the Windows Control Panel or Settings app, you are prompted whether you wish to delete `%APPDATA%\AIFirewall\`.
 - If confirmed, all database records, cryptographic keys, quarantine files, and logs are permanently removed from your computer.

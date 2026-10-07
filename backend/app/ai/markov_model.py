@@ -35,8 +35,11 @@ class SequenceAnalyzer:
         )
         score = 8.0
 
+        routine_actions = {"process_start", "web_browsing", "file_access", "app_launch", "system_event", "login"}
+        is_learning = len(history) < 10
+
         if len(history) < 4:
-            if current_action in {"usb_insertion", "network_spike"}:
+            if current_action in {"usb_insertion", "network_spike", "network_connection_suspicious"}:
                 score += 25.0
             if current_action == "file_transfer":
                 score += 18.0
@@ -44,9 +47,12 @@ class SequenceAnalyzer:
 
         action_counts = Counter(history)
         if current_action not in action_counts:
-            score += 35.0
+            # During early learning mode, do not penalize routine desktop actions as anomalous
+            if not (is_learning and current_action in routine_actions):
+                score += 35.0
         elif action_counts[current_action] <= 2:
-            score += 10.0
+            if not (is_learning and current_action in routine_actions):
+                score += 10.0
 
         if previous_action:
             transition_counts = Counter(zip(history[:-1], history[1:]))
@@ -54,15 +60,18 @@ class SequenceAnalyzer:
                 count for (source, _), count in transition_counts.items() if source == previous_action
             )
             if outgoing_total == 0:
-                score += 12.0
+                if not (is_learning and current_action in routine_actions):
+                    score += 12.0
             else:
                 transition_probability = (
                     transition_counts.get((previous_action, current_action), 0) / outgoing_total
                 )
                 if transition_probability == 0:
-                    score += 30.0
+                    if not (is_learning and current_action in routine_actions):
+                        score += 30.0
                 elif transition_probability < 0.1:
-                    score += 16.0
+                    if not (is_learning and current_action in routine_actions):
+                        score += 16.0
 
         last_three = normalized_sequence[-3:]
         if last_three[-2:] == ["usb_insertion", "file_transfer"]:

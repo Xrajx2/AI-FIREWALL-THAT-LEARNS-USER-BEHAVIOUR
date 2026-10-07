@@ -30,6 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rewritten API documentation and project specifications.
 
 ### Removed
-- Removed legacy Docker, Docker Compose, Redis, Celery, and cloud configuration files.
+- Removed legacy container, background queue services, and cloud configuration files.
 - Removed legacy test and demo scripts (`start_demo_day.cmd`, `demo_status_report.ps1`, `fix_demo_status.cmd`, etc.).
 - Purged hardcoded default database `aifirewall.db` from repository root.

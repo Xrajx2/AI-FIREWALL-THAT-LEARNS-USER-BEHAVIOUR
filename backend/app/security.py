@@ -31,9 +31,10 @@ def _restrict_file_permissions(file_path: str):
         username = os.environ.get("USERNAME")
         if username:
             try:
-                subprocess.run(
+                from app.process_utils import run_hidden
+                run_hidden(
                     ["icacls", file_path, "/inheritance:r", f"/grant:r", f"{username}:(R,W)"],
-                    capture_output=True,
+                    timeout=5,
                     check=False,
                 )
             except Exception:

@@ -85,7 +85,7 @@ function killBackendProcess() {
     console.log(`[App] Terminating backend process tree (PID: ${pid})...`);
     if (process.platform === 'win32') {
       try {
-        execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' });
+        execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', windowsHide: true });
       } catch (e) {
         try {
           backendProcess.kill('SIGKILL');

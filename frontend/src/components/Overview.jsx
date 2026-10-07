@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, ShieldAlert, ShieldBan, Cpu } from 'lucide-react';
+import { Activity, ShieldAlert, ShieldBan, Cpu, Globe, MapPin, Radio, Wifi, Clock, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import AccountSecurityPanel from './AccountSecurityPanel';
 import { getRiskTone, normalizeRiskLevel } from '../utils/risk';
@@ -109,6 +109,44 @@ export default function Overview() {
   const [aiInsights, setAiInsights] = useState(null);
   const [dashboardSummary, setDashboardSummary] = useState(null);
   const [pageWarning, setPageWarning] = useState('');
+  const [lastFetchTime, setLastFetchTime] = useState(null);
+  const [currentLocation, setCurrentLocation] = useState(null);
+  const [locationSecondsAgo, setLocationSecondsAgo] = useState(0);
+
+  const fetchCurrentLocation = async () => {
+    try {
+      const res = await fetch(buildApiUrl('/api/system/current-location'), { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentLocation(data);
+        setLocationSecondsAgo(0);
+      }
+    } catch {
+      setCurrentLocation((prev) => prev ? { ...prev, state: 'OFFLINE' } : {
+        ip: null,
+        city: '',
+        region: '',
+        country: '',
+        state: 'OFFLINE',
+        location_label: 'Location unavailable (offline)',
+        source: 'independent lookup',
+        accuracy: 'approximate, from IP'
+      });
+    }
+  };
+
+  useEffect(() => {
+    fetchCurrentLocation();
+    const locInterval = setInterval(fetchCurrentLocation, 300000);
+    return () => clearInterval(locInterval);
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLocationSecondsAgo((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -188,6 +226,7 @@ export default function Overview() {
             suspiciousConnections: activity.filter((item) => normalizeRiskLevel(item.risk_level, item.risk_score) !== 'Normal').length,
           });
           setChartData(buildChartSeries(activity, threats, 1));
+          setLastFetchTime(Date.now());
         }
       } catch (error) {
         console.error('Failed to fetch overview stats', error);
@@ -219,24 +258,82 @@ export default function Overview() {
         { title: 'Active Sessions', value: stats.blockedConnections, meta: `${stats.suspiciousConnections} suspicious recent events`, icon: <ShieldBan />, color: 'text-primary', bg: 'bg-primary/20', isAlert: stats.suspiciousConnections > 0 },
       ];
 
+  const telemetryAge = lastFetchTime ? Math.floor((Date.now() - lastFetchTime) / 1000) : 999;
+  const isTelemetryLive = telemetryAge <= 7;
+  const isTelemetryStale = telemetryAge > 7 && telemetryAge <= 20;
+
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 relative">
       {/* Ambient background glow */}
       <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-primary/5 rounded-full blur-[120px] pointer-events-none -z-10" />
 
       <AccountSecurityPanel summary={dashboardSummary} />
+
+      {/* User's Own Current Location Card (PART 3.3) */}
+      <div className="rounded-2xl border border-white/5 bg-secondary/30 backdrop-blur-md p-5 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="p-3 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 shrink-0">
+              <Globe size={22} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2.5">
+                <h3 className="text-base font-semibold text-white">Your Current Network Location</h3>
+                <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                  currentLocation?.state === 'LIVE' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
+                  currentLocation?.state === 'STALE' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
+                  'bg-zinc-500/10 text-zinc-400 border border-zinc-500/20'
+                }`}>
+                  {currentLocation?.state || 'CHECKING'}
+                </span>
+              </div>
+              <p className="text-xs text-gray-300 mt-1">
+                {currentLocation?.state === 'OFFLINE' || !currentLocation?.ip
+                  ? (currentLocation?.location_label || 'Location unavailable (offline)')
+                  : `${currentLocation.city ? `${currentLocation.city}, ` : ''}${currentLocation.region ? `${currentLocation.region}, ` : ''}${currentLocation.country || 'Unknown'}`}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:items-end text-xs text-gray-400 space-y-1">
+            <div>
+              <strong className="text-gray-300">Public IP:</strong>{' '}
+              <span className="font-mono text-cyan-400">{currentLocation?.ip || 'Unavailable'}</span>
+            </div>
+            <div>
+              <strong className="text-gray-300">Source:</strong> {currentLocation?.source || 'api.ipify.org (independent)'}{' '}
+              <span className="text-gray-500">({currentLocation?.accuracy || 'approximate, from IP'})</span>
+            </div>
+            <div className="text-[11px] text-gray-500">
+              Updated {locationSecondsAgo}s ago • Refreshed every 5 min or on network change
+            </div>
+          </div>
+        </div>
+      </div>
       
       <header className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-gray-800/60 pb-6">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <h2 className="text-3xl font-extrabold tracking-tight text-white">{adminMode ? 'System Overview' : 'My Security Overview'}</h2>
-            <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-success/10 border border-success/20">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-success"></span>
-              </span>
-              <span className="text-xs font-semibold text-success uppercase tracking-wider">Live</span>
-            </div>
+            {isTelemetryLive ? (
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-success/10 border border-success/20">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-success"></span>
+                </span>
+                <span className="text-xs font-semibold text-success uppercase tracking-wider">Live</span>
+              </div>
+            ) : isTelemetryStale ? (
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20">
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400"></span>
+                <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Stale ({telemetryAge}s)</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/20">
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-400"></span>
+                <span className="text-xs font-semibold text-rose-400 uppercase tracking-wider">Offline</span>
+              </div>
+            )}
           </div>
           <p className="text-gray-400 font-medium">
             {adminMode

@@ -288,7 +288,7 @@ def _extract_application_entries(
     if activity.action_type not in {"process_start", "app_usage", "application_open"}:
         return []
 
-    details = activity.details or ""
+    details = decrypt_sensitive_value(activity.details) or activity.details or ""
     marker = "New process detected:"
     if marker in details:
         parsed = details.split(marker, 1)[1].strip()
@@ -326,7 +326,7 @@ def _extract_file_entries(
     if activity.action_type not in {"file_access", "file_open", "file_transfer"}:
         return []
 
-    details = activity.details or ""
+    details = decrypt_sensitive_value(activity.details) or activity.details or ""
     if "Sample:" not in details:
         return []
 
@@ -415,7 +415,13 @@ def _compute_peak_hours(distribution: Dict[str, Any]) -> List[int]:
     return [hour for hour, _ in sorted_hours[:3]]
 
 
+_corrupt_dict_logged = False
+_corrupt_list_logged = False
+_corrupt_json_logged = False
+
+
 def _load_json_dict(raw_value: Optional[str]) -> Dict[str, Any]:
+    global _corrupt_dict_logged
     if not raw_value:
         return {}
     try:
@@ -423,14 +429,19 @@ def _load_json_dict(raw_value: Optional[str]) -> Dict[str, Any]:
         parsed = json.loads(decrypted)
         if isinstance(parsed, dict):
             return parsed
-        logger.warning("Corrupt JSON dict in behavior profile (not a dict), falling back to safe default {}.")
+        if not _corrupt_dict_logged:
+            logger.warning("Corrupt JSON dict in behavior profile (not a dict), falling back to safe default {}.")
+            _corrupt_dict_logged = True
         return {}
     except Exception as exc:
-        logger.warning(f"Corrupt JSON dict in behavior profile, falling back to safe default {{}}: {exc}")
+        if not _corrupt_dict_logged:
+            logger.warning(f"Corrupt JSON dict in behavior profile, falling back to safe default {{}}: {exc}")
+            _corrupt_dict_logged = True
         return {}
 
 
 def _load_json_list(raw_value: Optional[str]) -> List[Dict[str, Any]]:
+    global _corrupt_list_logged
     if not raw_value:
         return []
     try:
@@ -438,23 +449,43 @@ def _load_json_list(raw_value: Optional[str]) -> List[Dict[str, Any]]:
         parsed = json.loads(decrypted)
         if isinstance(parsed, list):
             return parsed
-        logger.warning("Corrupt JSON list in behavior profile (not a list), falling back to safe default [].")
+        if not _corrupt_list_logged:
+            logger.warning("Corrupt JSON list in behavior profile (not a list), falling back to safe default [].")
+            _corrupt_list_logged = True
         return []
     except Exception as exc:
-        logger.warning(f"Corrupt JSON list in behavior profile, falling back to safe default []: {exc}")
+        if not _corrupt_list_logged:
+            logger.warning(f"Corrupt JSON list in behavior profile, falling back to safe default []: {exc}")
+            _corrupt_list_logged = True
         return []
 
 
 def _parse_json(raw_value: Optional[str]) -> Optional[Dict[str, Any]]:
+    global _corrupt_json_logged
     if not raw_value:
         return None
     try:
         decrypted = decrypt_sensitive_value(raw_value) or ""
+        if not decrypted:
+            return None
         parsed = json.loads(decrypted)
         if isinstance(parsed, dict):
             return parsed
-        logger.warning("Corrupt JSON details in behavior activity (not a dict), falling back to None.")
+        if not _corrupt_json_logged:
+            logger.warning("Corrupt JSON details in behavior activity (not a dict), falling back to None.")
+            _corrupt_json_logged = True
+        return None
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Graceful compatibility: if legacy row stored plaintext rather than JSON, wrap in summary dict
+        if isinstance(decrypted, str) and decrypted.strip() and not decrypted.strip().startswith(("{", "[")):
+            return {"summary": decrypted.strip()}
+        if not _corrupt_json_logged:
+            logger.warning("Corrupt JSON details in behavior activity, falling back to None.")
+            _corrupt_json_logged = True
         return None
     except Exception as exc:
-        logger.warning(f"Corrupt JSON details in behavior activity, falling back to None: {exc}")
+        if not _corrupt_json_logged:
+            logger.warning(f"Corrupt JSON details in behavior activity, falling back to None: {exc}")
+            _corrupt_json_logged = True
         return None
+

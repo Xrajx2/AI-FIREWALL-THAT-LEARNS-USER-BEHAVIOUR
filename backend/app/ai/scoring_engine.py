@@ -37,12 +37,14 @@ class ScoringEngine:
 
         current_vector = self.encoder.vectorize(normalized_current, historical_rows)
         training_matrix = self.encoder.build_training_matrix(historical_rows[-240:])
+        training_samples = int(training_matrix.shape[0]) if training_matrix.size else 0
+        learning_mode = training_samples < 10
         context = self.encoder.summarize_context(normalized_current, historical_rows)
 
         isolation = self.point_model.score(user_id, current_vector, training_matrix)
         cluster = self.cluster_model.score(user_id, current_vector, training_matrix)
         sequence_score = self.sequence_model.predict_sequence_anomaly(action_sequence, historical_actions)
-        heuristic = self._heuristic_score(normalized_current, historical_rows, context)
+        heuristic = self._heuristic_score(normalized_current, historical_rows, context, learning_mode=learning_mode)
 
         component_scores = {
             "isolation_forest": isolation["score"],
@@ -71,8 +73,18 @@ class ScoringEngine:
             )
 
         reasons = heuristic["reasons"]
+        pre_override_score = final_score
         final_score = self._apply_overrides(normalized_current, final_score, reasons)
         final_score = float(np.clip(final_score, 0.0, 100.0))
+
+        # During learning mode, normal routine productivity actions should not trigger threat alerts
+        # unless an explicit threat override or high-risk indicator is present
+        routine_actions = {"process_start", "web_browsing", "file_access", "app_launch", "system_event", "login"}
+        if learning_mode and normalized_current["action_type"] in routine_actions:
+            if final_score == pre_override_score and not any(
+                r.startswith("Alert details contain high-risk indicators") for r in reasons
+            ):
+                final_score = min(final_score, 25.0)
 
         if final_score >= 70 and isolation["ready"]:
             reasons.append("Isolation Forest marked this event as an outlier versus learned user history.")
@@ -113,12 +125,15 @@ class ScoringEngine:
         current_activity: Dict[str, Any],
         historical_rows: Sequence[Dict[str, Any]],
         context: Dict[str, Any],
+        learning_mode: bool = False,
     ) -> Dict[str, Any]:
         score = 5.0
         reasons: List[str] = []
         current_hour = int(context["current_hour"])
         current_network = float(context["current_network_activity"])
         current_action = context["current_action"]
+        routine_actions = {"process_start", "web_browsing", "file_access", "app_launch", "system_event", "login"}
+        is_routine = current_action in routine_actions
 
         if current_action == "network_connection_suspicious":
             score += 34.0
@@ -136,8 +151,9 @@ class ScoringEngine:
                 score += 28.0
                 reasons.append(f"Access happened at an unusual time ({current_hour:02d}:00) for this user.")
             elif current_hour < 6 or current_hour > 21:
-                score += 16.0
-                reasons.append(f"Access happened during off-hours ({current_hour:02d}:00).")
+                if not (learning_mode and is_routine):
+                    score += 16.0
+                    reasons.append(f"Access happened during off-hours ({current_hour:02d}:00).")
 
             avg_network = float(context["avg_network_activity"])
             std_network = float(context["std_network_activity"])
@@ -154,15 +170,18 @@ class ScoringEngine:
                 reasons.append("Network transfer volume is a large spike over the user's baseline.")
 
             if context["known_action_count"] == 0:
-                score += 18.0
-                reasons.append(f"The action '{current_action}' has not been seen before for this user.")
+                if not (learning_mode and is_routine):
+                    score += 18.0
+                    reasons.append(f"The action '{current_action}' has not been seen before for this user.")
             if current_activity["device"] and context["known_device_count"] == 0:
-                score += 14.0
-                reasons.append("The event came from a new or rarely seen device.")
+                if not (learning_mode and is_routine):
+                    score += 14.0
+                    reasons.append("The event came from a new or rarely seen device.")
         else:
             if current_hour < 6 or current_hour > 21:
-                score += 18.0
-                reasons.append(f"Access happened during off-hours ({current_hour:02d}:00).")
+                if not (learning_mode and is_routine):
+                    score += 18.0
+                    reasons.append(f"Access happened during off-hours ({current_hour:02d}:00).")
             if current_network > 1000:
                 score += 25.0
                 reasons.append("Large transfer volume was observed before the model had baseline data.")
@@ -213,6 +232,9 @@ class ScoringEngine:
             reasons.append("Massive data transfer volume triggered a hard anomaly override.")
         if action == "file_transfer" and network_activity > 1500:
             score = max(score, 82.0)
+        if action in ("data_exfiltration", "malware_detected", "ransomware_detected") or "exfiltration" in details:
+            score = max(score, 88.0)
+            reasons.append("Malicious activity or data exfiltration pattern triggered security override.")
         if action == "network_connection_suspicious" and any(term in details for term in ("unknown", "outgoing", "remote", "public")):
             score = max(score, 58.0)
         if action == "network_connection_blocked":

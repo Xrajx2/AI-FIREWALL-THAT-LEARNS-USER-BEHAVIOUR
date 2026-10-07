@@ -8,6 +8,14 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
+# Prevent joblib/loky from executing PowerShell to probe CPU cores on Windows
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
+try:
+    import joblib.externals.loky.backend.context as loky_context
+    loky_context.physical_cores_cache = os.cpu_count() or 4
+except Exception:
+    pass
+
 # Add backend directory to sys.path
 backend_dir = str(Path(__file__).resolve().parent)
 if backend_dir not in sys.path:
@@ -117,7 +125,7 @@ def main():
 
     os.environ.setdefault("AI_FIREWALL_DESKTOP", "1")
     os.environ.setdefault("DATABASE_URL", get_database_url())
-    os.environ.setdefault("MONITOR_INTERVAL_SECONDS", "5")
+    os.environ.setdefault("MONITOR_INTERVAL_SECONDS", "30")
 
     import uvicorn
     import passlib.handlers.bcrypt  # Pre-import bcrypt for PyInstaller bundler

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Shield, Activity, AlertTriangle, LayoutDashboard, LogOut, Users, Terminal, ScanSearch, MonitorCog, Network, ShieldAlert, Settings, Globe, ArrowLeftRight, MapPin, Fish, Lock } from 'lucide-react';
+import { Shield, Activity, AlertTriangle, LayoutDashboard, LogOut, Users, Terminal, ScanSearch, MonitorCog, Network, ShieldAlert, Settings, Globe, ArrowLeftRight, MapPin, Fish, Lock, Server } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { buildApiUrl, clearAuthSession, getAuthHeaders, getStoredUser, isAdminUser } from '../utils/auth';
 
 const MENU_ITEMS = {
   overview: { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={20} /> },
+  systemStatus: { id: 'systemStatus', label: 'System Status', icon: <Server size={20} /> },
   trafficControl: { id: 'trafficControl', label: 'Traffic Control', icon: <ArrowLeftRight size={20} /> },
   accessLogs: { id: 'accessLogs', label: 'Access Logs', icon: <MapPin size={20} /> },
   phishing: { id: 'phishing', label: 'Phishing Checker', icon: <Fish size={20} /> },

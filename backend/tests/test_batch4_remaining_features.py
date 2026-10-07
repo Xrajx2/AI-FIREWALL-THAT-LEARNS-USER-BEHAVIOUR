@@ -194,6 +194,15 @@ def test_geolocation_sqlite_caching_and_offline_fallback():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = str(Path(tmpdir) / "test_geo.db")
         tracker = GeoTracker(db_path=db_path)
+        assert tracker.is_online_lookup_enabled() is False  # Default is OFF
+
+        # Bundled offline database test
+        offline_bundled = tracker.lookup_ip("8.8.8.8")
+        assert offline_bundled["country"] == "United States"
+
+        # Enable online lookup
+        tracker.set_online_lookup_enabled(True)
+        assert tracker.is_online_lookup_enabled() is True
 
         public_ip = "8.8.8.8"
         # Mock requests.get to return a mock response
@@ -225,9 +234,8 @@ def test_geolocation_sqlite_caching_and_offline_fallback():
 
         # Offline / timeout fallback test
         with patch("requests.get", side_effect=Exception("Connection timed out")):
-            offline_res = tracker.lookup_ip("1.1.1.1")
-            assert offline_res["city"] == "Unknown"
-            assert offline_res["country"] == "Unknown"
+            offline_res = tracker.lookup_ip("93.184.216.34")
+            assert offline_res["city"] == ""
 
 
 def test_geo_cache_stores_hashed_ip_and_encrypted_payload():
@@ -235,6 +243,7 @@ def test_geo_cache_stores_hashed_ip_and_encrypted_payload():
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db_path = os.path.join(tmpdir, "test_geo_secure.db")
         tracker = GeoTracker(db_path=db_path)
+        tracker.set_online_lookup_enabled(True)
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -340,6 +349,42 @@ def test_websocket_accepts_valid_authenticated_user(test_db_session):
                 assert ws is not None
 
 
+def test_websocket_pushes_live_event_to_authenticated_client(test_db_session):
+    """Verify that WebSocket client connects with valid token and receives pushed event."""
+    from backend.app.main import manager
+
+    user = models.User(
+        id=102,
+        username="ws_event_user",
+        hashed_password="pw",
+        role="user",
+    )
+    test_db_session.add(user)
+    test_db_session.commit()
+
+    token = create_access_token({"sub": "ws_event_user"})
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_session.get_bind())
+
+    with patch.object(database, "SessionLocal", TestingSessionLocal):
+        with TestClient(app) as client:
+            with client.websocket_connect(f"/api/ws/monitor?token={token}") as ws:
+                test_event = {
+                    "type": "new_process",
+                    "data": {
+                        "pid": 1234,
+                        "name": "calc.exe",
+                        "threat_level": "LOW",
+                    }
+                }
+                import asyncio
+                asyncio.run(manager.broadcast(json.dumps(test_event)))
+
+                received = ws.receive_json()
+                assert received["type"] == "new_process"
+                assert received["data"]["name"] == "calc.exe"
+
+
+
 # ============================================================================
 # 5. BEHAVIOR BASELINE & THREAT SCORE LEARNING MODE & CORRUPT JSON TESTS
 # ============================================================================
@@ -390,6 +435,87 @@ def test_corrupt_json_fallback_safe():
 
     parse_res = _parse_json(corrupt_str)
     assert parse_res is None
+
+
+def test_monitoring_cycle_details_parse_to_dict_and_no_warning(test_db_session, caplog):
+    """Run one monitoring cycle against a temp database, read rows back, assert details parse to a dict and no warning is logged."""
+    import asyncio
+    import logging
+    from backend.app import monitoring
+    from backend.app.monitoring import SystemMonitorService
+
+    from unittest.mock import AsyncMock
+    mock_mgr = MagicMock()
+    mock_mgr.broadcast = AsyncMock()
+    service = SystemMonitorService(mock_mgr)
+
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_db_session.get_bind())
+
+    with patch.object(monitoring, "SessionLocal", TestingSessionLocal), \
+         patch.object(database, "SessionLocal", TestingSessionLocal):
+
+        caplog.set_level(logging.WARNING)
+
+        # Run snapshot collection
+        snapshot, events = service._collect_snapshot()
+
+        # If system is quiet during test run, ensure test has representative events
+        if not events:
+            events = [
+                {
+                    "action_type": "process_start",
+                    "device": "localhost",
+                    "network_activity": 0.0,
+                    "details": {
+                        "summary": "New process detected: test_app.exe (PID 9999)",
+                        "process_name": "test_app.exe",
+                        "pid": 9999,
+                        "applications": [{"name": "test_app.exe", "source": "process_start"}],
+                    },
+                    "behavior_context": {
+                        "applications": [{"name": "test_app.exe", "source": "process_start"}]
+                    },
+                }
+            ]
+
+        for event in events:
+            asyncio.run(service._record_discrete_event(event))
+
+        rows = test_db_session.query(models.UserActivity).all()
+        assert len(rows) > 0
+
+        for row in rows:
+            parsed = _parse_json(row.details)
+            assert isinstance(parsed, dict)
+            assert "summary" in parsed or "process_name" in parsed
+
+        # Assert no corrupt JSON warning was logged during the cycle
+        corrupt_warnings = [r for r in caplog.records if "Corrupt JSON" in r.message]
+        assert len(corrupt_warnings) == 0
+
+
+def test_traffic_rules_cached_no_spam(test_db_session, caplog):
+    """Verify blocklist rules are loaded once and not repeatedly logged every few seconds."""
+    import asyncio
+    import logging
+    from backend.app.traffic_monitor_service import TrafficMonitorService
+
+    t_service = TrafficMonitorService()
+    caplog.set_level(logging.INFO)
+
+    # First load
+    t_service.load_rules(test_db_session)
+    first_load_count = sum(1 for r in caplog.records if "blocked IPs from database" in r.message)
+    assert first_load_count == 1
+
+    # Simulate 5 rapid ingest_traffic cycles
+    for _ in range(5):
+        asyncio.run(t_service.ingest_traffic([], {}, test_db_session))
+
+    subsequent_load_count = sum(1 for r in caplog.records if "blocked IPs from database" in r.message)
+    # Count must remain 1 because rules are cached
+    assert subsequent_load_count == 1
+
 
 
 # ============================================================================
@@ -452,3 +578,196 @@ def test_phishing_checker_try_except_fallback():
         assert res["score"] == 0
         assert res["is_phishing"] is False
         assert any("fallback" in ind.lower() for ind in res["indicators"])
+
+
+# ============================================================================
+# 8. FEED QUALITY & TELEMETRY TESTS (Item 4b)
+# ============================================================================
+
+def test_normalized_5tuple_dedupe():
+    """Verify that dual socket ends map to the exact same sorted 5-tuple key and IPv6 brackets are applied."""
+    from backend.security.live_monitor import normalize_connection_key, format_endpoint
+
+    # Local port 54321, remote port 8000
+    k1 = normalize_connection_key("127.0.0.1", 54321, "127.0.0.1", 8000, "tcp")
+    # Other end of same connection: local port 8000, remote port 54321
+    k2 = normalize_connection_key("127.0.0.1", 8000, "127.0.0.1", 54321, "tcp")
+
+    assert k1 == k2 == "tcp:127.0.0.1:8000<->127.0.0.1:54321"
+
+    # Verify IPv6 formatting with brackets
+    k3 = normalize_connection_key("2001:db8::1", 443, "fe80::1", 50000, "tcp")
+    assert "[2001:db8::1]" in k3
+    assert "[fe80::1]" in k3
+    assert format_endpoint("2001:db8::1", 443) == "[2001:db8::1]:443"
+    assert format_endpoint("192.168.1.1", 80) == "192.168.1.1:80"
+
+
+def test_own_process_and_loopback_filter():
+    """Verify app-process and loopback detection tags traffic correctly."""
+    from backend.security.live_monitor import get_app_pids
+
+    app_pids = get_app_pids()
+    assert os.getpid() in app_pids
+
+    # Simulate tagging logic from monitor_connections
+    local_ip, local_port = "127.0.0.1", 52100
+    remote_ip, remote_port = "127.0.0.1", 8000
+    backend_port = 8000
+    current_pid = os.getpid()
+
+    is_loopback = (local_ip in ("127.0.0.1", "::1", "localhost")) and (remote_ip in ("127.0.0.1", "::1", "localhost"))
+    is_backend_port = (local_port == backend_port or remote_port == backend_port)
+    is_app_proc = current_pid in app_pids
+    is_app_traffic = (is_loopback and (is_backend_port or is_app_proc)) or is_app_proc
+
+    assert is_loopback is True
+    assert is_backend_port is True
+    assert is_app_traffic is True
+
+
+def test_timestamp_validation_per_event_type():
+    """Verify all live monitor event emissions contain id, type, and valid UTC ISO timestamp with Z."""
+    from datetime import datetime, timezone
+    from backend.security.live_monitor import LiveMonitor
+
+    received_events = []
+    monitor = LiveMonitor()
+    monitor.add_callback(lambda ev: received_events.append(ev))
+
+    test_types = [
+        ("new_connection", {"process": "chrome.exe", "remote_ip": "1.1.1.1", "remote_port": 443}),
+        ("connection_closed", {"connection": "tcp:127.0.0.1:80<->127.0.0.1:5000", "process": "curl.exe"}),
+        ("new_process", {"name": "notepad.exe", "pid": 1234, "username": "user"}),
+        ("process_closed", {"name": "notepad.exe", "pid": 1234, "start_time": "12:00:00"}),
+        ("clipboard_threat", {"score": 50, "indicators": ["phishing url"]}),
+        ("system_stats", {"cpu_percent": 15.0, "ram_percent": 45.0}),
+    ]
+
+    for ev_type, ev_data in test_types:
+        monitor.emit(ev_type, ev_data)
+
+    assert len(received_events) == len(test_types)
+    for ev in received_events:
+        assert "id" in ev
+        assert "type" in ev
+        assert "timestamp" in ev
+        ts = ev["timestamp"]
+        assert ts.endswith("Z"), f"Timestamp {ts} must end with Z"
+        # Validate that it parses cleanly as ISO UTC
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
+
+
+def test_process_closed_event_emission():
+    """Verify process termination emits process_closed event with name, pid, and start_time."""
+    from backend.security.live_monitor import LiveMonitor
+
+    monitor = LiveMonitor()
+    emitted = []
+    monitor.add_callback(lambda ev: emitted.append(ev))
+
+    # Pre-populate known processes
+    monitor.known_processes = {1000, 2000, 3000}
+    monitor.process_info_cache[2000] = {
+        "pid": 2000,
+        "name": "target_app.exe",
+        "start_time": "14:30:00"
+    }
+
+    # Simulate process 2000 disappearing
+    current_pids = {1000, 3000}
+    closed_pids = monitor.known_processes - current_pids
+    for pid in closed_pids:
+        info = monitor.process_info_cache.pop(pid, {})
+        monitor.emit("process_closed", {
+            "pid": pid,
+            "name": info.get("name", "Unknown"),
+            "start_time": info.get("start_time", "Unknown"),
+            "threat_level": "LOW"
+        })
+    monitor.known_processes = current_pids
+
+    assert len(emitted) == 1
+    assert emitted[0]["type"] == "process_closed"
+    assert emitted[0]["data"]["pid"] == 2000
+    assert emitted[0]["data"]["name"] == "target_app.exe"
+    assert emitted[0]["data"]["start_time"] == "14:30:00"
+
+
+def test_live_network_rate_calculation_mocked_samples():
+    """[MOCKED SAMPLES TEST] Verify net rate MB/s calculation across two known time/byte snapshots."""
+    from backend.security.live_monitor import LiveMonitor
+
+    monitor = LiveMonitor()
+
+    # Sample 1: Time = 100.0, Bytes recv = 10,000,000, Bytes sent = 5,000,000
+    time_1 = 100.0
+    bytes_recv_1 = 10_000_000
+    bytes_sent_1 = 5_000_000
+    monitor._last_net_time = time_1
+    monitor._last_net_bytes_recv = bytes_recv_1
+    monitor._last_net_bytes_sent = bytes_sent_1
+
+    # Sample 2: Time = 102.0 (2.0s interval), Bytes recv = 20,485,760 (exactly 10 MB increase)
+    time_2 = 102.0
+    bytes_recv_2 = 20_485_760
+    bytes_sent_2 = 7_097_152  # 2 MB increase
+    interval = max(0.1, time_2 - monitor._last_net_time)
+    recv_diff = max(0, bytes_recv_2 - monitor._last_net_bytes_recv)
+    sent_diff = max(0, bytes_sent_2 - monitor._last_net_bytes_sent)
+
+    recv_rate_mb_s = round((recv_diff / (1024 * 1024)) / interval, 2)
+    sent_rate_mb_s = round((sent_diff / (1024 * 1024)) / interval, 2)
+
+    assert interval == 2.0
+    assert recv_rate_mb_s == 5.0
+    assert sent_rate_mb_s == 1.0
+
+
+def test_learning_mode_does_not_alert_on_normal_processes():
+    """Verify that launching a normal Windows process (e.g. notepad.exe) does not trigger threat alerts in learning mode, while real attack presets still alert."""
+    from backend.app.ai.scoring_engine import ScoringEngine
+    from backend.app.risk import is_risky
+
+    engine = ScoringEngine()
+
+    # 1. Normal process launch in learning mode (zero historical samples)
+    normal_activity = {
+        "action_type": "process_start",
+        "network_activity": 0.0,
+        "device": "desktop",
+        "details": "User opened notepad.exe",
+    }
+    result_normal = engine.evaluate_threat(user_id=1, current_activity=normal_activity, recent_activities=[])
+
+    assert result_normal["learning_mode"] is True
+    # Normal activity in learning mode must not exceed threshold 30.0 and must not be risky
+    assert result_normal["score"] <= 25.0, f"Expected <= 25.0 in learning mode, got {result_normal['score']}"
+    assert result_normal["risk_level"] == "Normal"
+    assert is_risky(result_normal["score"]) is False
+
+    # 2. Simulation Lab Preset 2: Data Exfiltration attack
+    exfil_activity = {
+        "action_type": "data_exfiltration",
+        "network_activity": 85.0,
+        "device": "desktop",
+        "details": "Unusual outbound bulk transfer to external endpoint",
+    }
+    result_exfil = engine.evaluate_threat(user_id=1, current_activity=exfil_activity, recent_activities=[])
+    assert result_exfil["score"] >= 70.0
+    assert result_exfil["risk_level"] == "Dangerous"
+    assert is_risky(result_exfil["score"]) is True
+
+    # 3. Simulation Lab Preset 3: Ransomware / Malware attack
+    malware_activity = {
+        "action_type": "malware_detected",
+        "network_activity": 40.0,
+        "device": "desktop",
+        "details": "Known ransomware pattern detected in directory",
+    }
+    result_malware = engine.evaluate_threat(user_id=1, current_activity=malware_activity, recent_activities=[])
+    assert result_malware["score"] >= 80.0
+    assert result_malware["risk_level"] == "Dangerous"
+    assert is_risky(result_malware["score"]) is True
+

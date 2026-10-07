@@ -329,19 +329,22 @@
   <main class="container">
     <!-- Hero Section -->
     <section class="hero">
-      <div class="badge">Windows Desktop Security • v1.0.0</div>
+      <div class="badge">Windows Desktop Security • v1.0.0 Beta</div>
       <h1>Host Defense Powered by<br><span>Behavioral Sequence Modeling</span></h1>
       <p>
         An open-source, local-first cybersecurity suite for Windows 10 & 11. Monitors event transitions, detects phishing & spam, defends against malicious domains, and scans removable media.
       </p>
       <div class="cta-group">
-        <a href="https://github.com/Xrajx2/AI-FIREWALL-THAT-LEARNS-USER-BEHAVIOUR/releases/download/v1.0.0/AI-Firewall-Setup-1.0.0.exe" class="download-btn">
+        <a href="https://github.com/Xrajx2/AI-FIREWALL-THAT-LEARNS-USER-BEHAVIOUR/releases/download/v1.0.0-beta.2/AI-Firewall-Setup-1.0.0.exe" class="download-btn">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
             <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
           </svg>
-          Download AI Firewall v1.0.0 for Windows
+          Download AI Firewall v1.0.0 Beta 2 for Windows
         </a>
         <span class="btn-subtext">Windows 10 / 11 64-bit • Requires Administrator • Free & Open Source</span>
+        <div style="margin-top: 10px; font-family: monospace; font-size: 0.8rem; color: var(--text-muted); word-break: break-all;">
+          SHA-256: <span style="color: var(--accent);">D27886F3A187D4AC22EBE7954C454AFAFC4AAFAC228CC8CAC7D3C47D53043282</span>
+        </div>
       </div>
     </section>
 
@@ -479,12 +482,18 @@
       </table>
     </section>
 
-    <!-- Known Limitations -->
+    <!-- Known Limitations & Honest Technical Boundaries -->
     <section>
-      <h2 class="section-title">Known Considerations</h2>
-      <div class="callout" style="border-left-color: var(--accent); background: rgba(0, 229, 255, 0.05);">
-        <h4 style="color: var(--accent);">Academic & Educational Demonstration</h4>
-        <p>AI Firewall is designed for educational exploration and personal host defense experimentation. It is not an enterprise Next-Generation Firewall or EDR agent. Always maintain up-to-date Windows Defender antivirus protection alongside AI Firewall.</p>
+      <h2 class="section-title">Transparent Technical Limitations</h2>
+      <div class="callout" style="border-left-color: var(--accent); background: rgba(0, 229, 255, 0.05); margin-bottom: 16px;">
+        <h4 style="color: var(--accent);">Architectural Boundaries & Operating Constraints</h4>
+        <ul style="margin-top: 8px; padding-left: 20px; color: var(--text-muted); line-height: 1.6;">
+          <li><strong>Hosts File Blocking Boundaries:</strong> Domain blocking functions via loopback (<code>127.0.0.1</code>) redirection in <code>%WINDIR%\System32\drivers\etc\hosts</code>. Browsers configured with <em>Secure DNS (DNS over HTTPS / DoH)</em> bypass OS-level hosts resolution by querying encrypted third-party resolvers directly. In addition, connecting directly to an IP address bypasses DNS blocking entirely.</li>
+          <li><strong>Windows Firewall Loopback Limitation:</strong> The Windows Filtering Platform and Windows Defender Firewall do not filter local loopback (<code>127.0.0.1</code> / <code>::1</code>) traffic. Firewall block rules apply strictly to external network interfaces.</li>
+          <li><strong>Location Estimation:</strong> System location is derived from public IPv4/IPv6 address allocations (IANA / Regional Internet Registries) and independent lookups (<code>api.ipify.org</code> with a 3s timeout). It represents regional ISP routing centers, not GPS device coordinates. Offline status displays <code>Location unavailable (offline)</code>.</li>
+          <li><strong>Privilege Requirements:</strong> Native security enforcement (managing firewall rules, writing to the hosts file, terminating rogue processes) strictly requires local Administrator elevation (<code>requireAdministrator</code>).</li>
+          <li><strong>Academic & Educational Demonstration:</strong> AI Firewall is designed for educational exploration and personal host defense experimentation. It is not an enterprise Next-Generation Firewall or EDR agent. Always maintain up-to-date Windows Defender antivirus protection alongside AI Firewall.</li>
+        </ul>
       </div>
     </section>
   </main>

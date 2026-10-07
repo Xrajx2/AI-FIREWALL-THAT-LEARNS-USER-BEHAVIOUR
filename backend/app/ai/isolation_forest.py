@@ -60,6 +60,7 @@ class PointAnomalyDetector:
             contamination=0.1,
             n_estimators=200,
             random_state=42,
+            n_jobs=1,
         )
         model.fit(training_scaled)
         training_scores = model.decision_function(training_scaled)

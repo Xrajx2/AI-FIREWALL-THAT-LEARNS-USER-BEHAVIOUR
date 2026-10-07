@@ -193,7 +193,7 @@ export default function DesktopSecurityPanel() {
         <MetricCard title="Processes" value={securityCenter.processes?.count || 0} detail={`${securityCenter.processes?.suspicious?.length || 0} suspicious`} icon={<Cpu />} />
         <MetricCard title="Connections" value={securityCenter.traffic?.connection_count || 0} detail={`${securityCenter.traffic?.applications?.length || 0} active apps`} icon={<Network />} />
         <MetricCard title="Risk Peak" value={normalizeRiskLevel(null, highestRisk)} detail={`Score ${highestRisk.toFixed(1)}`} icon={<Radar />} tone={getRiskTone(null, highestRisk).text} />
-        <MetricCard title="AI Scanners" value="Ready" detail="Email, notification, clipboard, URL" icon={<ShieldCheck />} />
+        <MetricCard title="AI Scanners" value={securityCenter.scanners?.status || 'Active'} detail={`${securityCenter.scanners?.active_count || 4} engines (Phish, Spam, Clip, Proc)`} icon={<ShieldCheck />} />
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

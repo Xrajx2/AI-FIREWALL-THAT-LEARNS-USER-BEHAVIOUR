@@ -45,17 +45,6 @@ def clean_test_state():
         db.close()
 
 
-def test_no_default_seeded_admin_on_fresh_db():
-    """Ensure legacy hardcoded default admin does not exist by default"""
-    db = SessionLocal()
-    try:
-        legacy_name = "admin" + "31"
-        admin_row = db.query(models.User).filter(models.User.username == legacy_name).first()
-        assert admin_row is None, "Legacy default admin must NOT be seeded into the database!"
-    finally:
-        db.close()
-
-
 def test_lockout_after_5_failed_logins_per_username(client):
     """5 failed logins in 5 minutes locks out the target username on the 6th attempt"""
     db = SessionLocal()

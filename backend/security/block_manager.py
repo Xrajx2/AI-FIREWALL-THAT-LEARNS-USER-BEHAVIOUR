@@ -161,21 +161,35 @@ class BlockManager:
         return [dict(zip(cols, row)) for row in rows]
 
     def _block_ip_firewall(self, ip: str, reason: str):
-        name = f"AIFirewall_BLOCK_{ip.replace('.','_')}"
-        for d in ['in', 'out']:
-            subprocess.run([
-                'netsh', 'advfirewall', 'firewall', 'add', 'rule',
-                f'name={name}_{d}', f'dir={d}', 'action=block',
-                f'remoteip={ip}', 'enable=yes'
-            ], capture_output=True, timeout=10)
+        try:
+            try:
+                from app.process_utils import run_hidden
+            except ImportError:
+                from backend.app.process_utils import run_hidden
+            name = f"AIFirewall_BLOCK_{ip.replace('.','_')}"
+            for d in ['in', 'out']:
+                run_hidden([
+                    'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                    f'name={name}_{d}', f'dir={d}', 'action=block',
+                    f'remoteip={ip}', 'enable=yes'
+                ], timeout=10)
+        except Exception:
+            pass
 
     def _unblock_ip_firewall(self, ip: str):
-        name = f"AIFirewall_BLOCK_{ip.replace('.','_')}"
-        for d in ['in', 'out']:
-            subprocess.run([
-                'netsh', 'advfirewall', 'firewall', 'delete', 'rule',
-                f'name={name}_{d}'
-            ], capture_output=True, timeout=10)
+        try:
+            try:
+                from app.process_utils import run_hidden
+            except ImportError:
+                from backend.app.process_utils import run_hidden
+            name = f"AIFirewall_BLOCK_{ip.replace('.','_')}"
+            for d in ['in', 'out']:
+                run_hidden([
+                    'netsh', 'advfirewall', 'firewall', 'delete', 'rule',
+                    f'name={name}_{d}'
+                ], timeout=10)
+        except Exception:
+            pass
 
     def _block_domain(self, domain: str):
         hosts_path = r'C:\Windows\System32\drivers\etc\hosts'
@@ -184,9 +198,13 @@ class BlockManager:
             with open(hosts_path, 'a') as f:
                 f.write(entry)
         except Exception:
-            subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+            try:
+                from app.process_utils import run_hidden
+            except ImportError:
+                from backend.app.process_utils import run_hidden
+            run_hidden(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
                 f'Add-Content -Path "{hosts_path}" -Value "127.0.0.1 {domain}  # AIFirewall_BLOCK"'
-            ], capture_output=True)
+            ], timeout=10)
 
     def _unblock_domain(self, domain: str):
         hosts_path = r'C:\Windows\System32\drivers\etc\hosts'
