@@ -73,6 +73,32 @@ def check_and_recover_sqlite_db(db_url: str):
 
 check_and_recover_sqlite_db(DATABASE_URL)
 
+def ensure_schema_migrations(db_url: str):
+    if not db_url.startswith("sqlite"):
+        return
+    raw_path = db_url.replace("sqlite:///", "").replace("sqlite://", "").split("?")[0]
+    if not raw_path or raw_path == ":memory:" or not os.path.exists(raw_path):
+        return
+    try:
+        conn = sqlite3.connect(raw_path, timeout=10)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(users);")
+            columns = [row[1] for row in cur.fetchall()]
+            if "country" not in columns:
+                cur.execute("ALTER TABLE users ADD COLUMN country VARCHAR DEFAULT 'United States';")
+            if "auth_provider" not in columns:
+                cur.execute("ALTER TABLE users ADD COLUMN auth_provider VARCHAR DEFAULT 'local';")
+            if "is_email_verified" not in columns:
+                cur.execute("ALTER TABLE users ADD COLUMN is_email_verified BOOLEAN DEFAULT 1;")
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Schema migration error: {e}")
+
+ensure_schema_migrations(DATABASE_URL)
+
 engine_options = {}
 if DATABASE_URL.startswith("sqlite"):
     engine_options["connect_args"] = {"check_same_thread": False, "timeout": 60}

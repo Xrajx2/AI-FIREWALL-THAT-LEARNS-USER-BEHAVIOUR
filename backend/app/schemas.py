@@ -7,18 +7,19 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 class UserCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    username: str = Field(min_length=3, max_length=32)
+    username: str = Field(min_length=3, max_length=64)
     email: Optional[EmailStr] = None
     password: str = Field(min_length=8, max_length=128)
     role: str = Field(default="user", min_length=4, max_length=16)
+    country: Optional[str] = Field(default="United States", max_length=100)
     admin_invite_code: Optional[str] = Field(default=None, max_length=128)
 
     @field_validator("username")
     @classmethod
     def normalize_username(cls, value: str) -> str:
         cleaned = value.strip()
-        if not cleaned.replace("_", "").replace("-", "").isalnum():
-            raise ValueError("Username may only contain letters, numbers, dashes, and underscores")
+        if not cleaned.replace("_", "").replace("-", "").replace("@", "").replace(".", "").isalnum():
+            raise ValueError("Username may only contain letters, numbers, @, dashes, underscores, and dots")
         return cleaned
 
     @field_validator("password")
@@ -50,11 +51,34 @@ class AuthLoginRequest(BaseModel):
     remember_me: bool = False
 
 
+class SendOtpRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    email: EmailStr
+    purpose: str = Field(default="signup", max_length=32)
+
+
+class VerifyOtpRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    email: EmailStr
+    otp: str = Field(min_length=6, max_length=6)
+
+
+class SocialLoginRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    provider: str = Field(pattern="^(google|microsoft)$")
+    provider_id: Optional[str] = Field(default=None, max_length=255)
+    email: EmailStr
+    name: str = Field(min_length=1, max_length=128)
+    country: Optional[str] = Field(default="United States", max_length=100)
+
+
 class UserResponse(BaseModel):
     id: int
     username: str
     email: Optional[str] = None
     role: str
+    country: Optional[str] = "United States"
+    auth_provider: Optional[str] = "local"
     created_at: Optional[datetime] = None
     is_active: bool = True
     is_locked: bool = False

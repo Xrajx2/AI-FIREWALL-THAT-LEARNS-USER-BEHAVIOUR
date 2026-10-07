@@ -21,6 +21,8 @@ class User(Base):
     last_login_ip_hash = Column(String, index=True, nullable=True)
     last_login_device = Column(String, nullable=True)
     last_login_device_hash = Column(String, index=True, nullable=True)
+    country = Column(String, default="United States", nullable=True)
+    auth_provider = Column(String, default="local", nullable=True)
     
     activities = relationship("UserActivity", back_populates="user")
     threats = relationship("ThreatLog", back_populates="user")

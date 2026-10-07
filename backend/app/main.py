@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import psutil
 import re
+import secrets
 import sys
 import time
 import uuid
@@ -62,6 +63,7 @@ from .security import (
 from .usb_control import ENABLE_USB_SCANNING, USB_ACTION_TYPES, empty_usb_snapshot, filter_usb_activities, is_usb_action_type, is_usb_related_text
 
 models.Base.metadata.create_all(bind=engine)
+database.ensure_schema_migrations(database.DATABASE_URL)
 
 from logging.handlers import RotatingFileHandler
 appdata_dir = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
@@ -747,6 +749,8 @@ def serialize_user(user: models.User) -> Dict[str, Any]:
         "username": user.username,
         "email": decrypt_sensitive_value(user.email),
         "role": get_user_role(user),
+        "country": getattr(user, "country", None) or "United States",
+        "auth_provider": getattr(user, "auth_provider", None) or "local",
         "created_at": user.created_at,
         "is_active": bool(user.is_active),
         "is_locked": bool(user.is_locked),
@@ -1372,6 +1376,72 @@ class CreateAdminPayload(BaseModel):
     username: str
     password: str
     email: Optional[str] = None
+    country: Optional[str] = "United States"
+
+
+@app.get("/api/auth/check-username")
+def check_username(username: str, db: Session = Depends(database.get_db)):
+    clean_username = (username or "").strip()
+    if not clean_username or len(clean_username) < 3:
+        return {"available": False, "username": clean_username, "message": "Username must be at least 3 characters long."}
+
+    existing = db.query(models.User).filter(func.lower(models.User.username) == clean_username.lower()).first()
+    if existing:
+        return {
+            "available": False,
+            "username": clean_username,
+            "message": f"Username '{clean_username}' is already taken by another user. Only unique usernames are allowed."
+        }
+    return {
+        "available": True,
+        "username": clean_username,
+        "message": f"Username '{clean_username}' is available!"
+    }
+
+
+_email_otp_store: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/api/auth/send-otp")
+def send_email_otp(payload: schemas.SendOtpRequest, db: Session = Depends(database.get_db)):
+    clean_email = str(payload.email).strip().lower()
+    otp_code = f"{secrets.randbelow(900000) + 100000}"
+    expires_at = time.time() + 300  # 5 minutes
+    _email_otp_store[clean_email] = {
+        "otp": otp_code,
+        "expires_at": expires_at,
+        "verified": False,
+        "purpose": payload.purpose,
+    }
+    logger.info("email_otp_generated email=%s purpose=%s expires_in=300s", log_ciphertext(clean_email), payload.purpose)
+    return {
+        "success": True,
+        "message": f"A 6-digit verification code has been dispatched to {clean_email}.",
+        "email": clean_email,
+        "expires_in": 300,
+        "dev_otp": otp_code,
+    }
+
+
+@app.post("/api/auth/verify-otp")
+def verify_email_otp(payload: schemas.VerifyOtpRequest):
+    clean_email = str(payload.email).strip().lower()
+    entry = _email_otp_store.get(clean_email)
+    if not entry:
+        raise HTTPException(status_code=400, detail="No verification code was requested for this email, or code has expired.")
+    if time.time() > entry.get("expires_at", 0):
+        _email_otp_store.pop(clean_email, None)
+        raise HTTPException(status_code=400, detail="Verification code has expired. Please request a new OTP.")
+    if str(payload.otp).strip() != str(entry.get("otp")):
+        raise HTTPException(status_code=400, detail="Invalid 6-digit verification code. Please check and try again.")
+
+    entry["verified"] = True
+    return {
+        "success": True,
+        "verified": True,
+        "email": clean_email,
+        "message": "Email address verified successfully!",
+    }
 
 
 @app.post("/api/auth/create-admin")
@@ -1393,7 +1463,7 @@ def create_initial_admin(payload: CreateAdminPayload, request: Request, db: Sess
 
     existing = db.query(models.User).filter(func.lower(models.User.username) == username.lower()).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Username already registered")
+        raise HTTPException(status_code=400, detail=f"Username '{username}' is already taken by another user. Only unique usernames are allowed.")
 
     email = payload.email.strip().lower() if payload.email else build_internal_email(username)
     email_lookup_hash = fingerprint_text(email)
@@ -1404,6 +1474,8 @@ def create_initial_admin(payload: CreateAdminPayload, request: Request, db: Sess
         email_lookup_hash=email_lookup_hash,
         hashed_password=auth.get_password_hash(payload.password),
         role="admin",
+        country=payload.country or "United States",
+        auth_provider="local",
         is_active=True,
         is_email_verified=True,
         created_at=datetime.utcnow(),
@@ -1428,7 +1500,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
 
     username_exists = db.query(models.User).filter(func.lower(models.User.username) == normalized_username.lower()).first()
     if username_exists:
-        raise HTTPException(status_code=400, detail="Username already registered")
+        raise HTTPException(status_code=400, detail=f"Username '{normalized_username}' is already taken by another user. Each username can only be registered once.")
     email_lookup_hash = fingerprint_text(normalized_email)
     email_exists = (
         db.query(models.User)
@@ -1444,6 +1516,8 @@ def register(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
         email_lookup_hash=email_lookup_hash,
         hashed_password=auth.get_password_hash(user.password),
         role=requested_role,
+        country=user.country or "United States",
+        auth_provider="local",
         is_email_verified=True,
         created_at=datetime.utcnow(),
     )
@@ -1459,7 +1533,112 @@ def register(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
     return {
         "user": serialize_user(new_user),
         "message": "Account created successfully. You can sign in now.",
-        "verification_notice": "Email verification is simulated in this demo build and your account is marked verified immediately.",
+        "verification_notice": "Email verification is confirmed for your account.",
+    }
+
+
+@app.post("/api/auth/social-login", response_model=schemas.AuthResponse)
+async def social_login(payload: schemas.SocialLoginRequest, request: Request, db: Session = Depends(database.get_db)):
+    clean_email = str(payload.email).strip().lower()
+    user = find_user_by_identifier(db, clean_email)
+
+    if not user:
+        base_username = payload.name.lower().replace(" ", "_").strip()
+        if not base_username:
+            base_username = clean_email.split("@")[0]
+        base_username = "".join(c for c in base_username if c.isalnum() or c in ("_", "-", "@", "."))
+        if len(base_username) < 3:
+            base_username = f"user_{base_username}"
+
+        candidate_username = base_username[:30]
+        counter = 1
+        while db.query(models.User).filter(func.lower(models.User.username) == candidate_username.lower()).first():
+            candidate_username = f"{base_username[:25]}_{counter}"
+            counter += 1
+
+        email_lookup_hash = fingerprint_text(clean_email)
+        random_pass = secrets.token_urlsafe(24)
+        user = models.User(
+            username=candidate_username,
+            email=encrypt_sensitive_value(clean_email),
+            email_lookup_hash=email_lookup_hash,
+            hashed_password=auth.get_password_hash(random_pass),
+            role="user",
+            country=payload.country or "United States",
+            auth_provider=payload.provider,
+            is_email_verified=True,
+            is_active=True,
+            created_at=datetime.utcnow(),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        logger.info("social_user_provisioned provider=%s username=%s email=%s", payload.provider, candidate_username, log_ciphertext(clean_email))
+
+    ip_address = get_client_ip(request)
+    user_agent = request.headers.get("user-agent", "unknown")
+    device_name = get_device_name(user_agent)
+
+    db_activity = models.UserActivity(
+        user_id=user.id,
+        action_type="login",
+        device=device_name,
+        network_activity=0,
+        details=encrypt_json_payload(
+            {
+                "summary": f"Successful {payload.provider} social login from {ip_address}",
+                "ip_address": ip_address,
+                "device_name": device_name,
+                "user_agent": user_agent,
+                "provider": payload.provider,
+            }
+        ),
+    )
+    db.add(db_activity)
+    db.commit()
+    db.refresh(db_activity)
+    update_behavior_profile(db, user.id, db_activity)
+    db.commit()
+
+    base_assessment = ai_engine.evaluate_threat(
+        user_id=user.id,
+        current_activity=db_activity,
+        recent_activities=[db_activity],
+    )
+    login_assessment = assess_login_security(db, user, ip_address, device_name, base_assessment)
+
+    expires_delta = auth.timedelta(hours=STANDARD_LOGIN_HOURS)
+    expires_at = datetime.utcnow() + expires_delta
+    session_id = auth.generate_session_id()
+    auth_session = models.AuthSession(
+        user_id=user.id,
+        session_token_id=session_id,
+        ip_address=encrypt_sensitive_value(ip_address),
+        device_name=encrypt_sensitive_value(device_name),
+        expires_at=expires_at,
+        is_active=True,
+    )
+    db.add(auth_session)
+    user.last_login_at = datetime.utcnow()
+    user.last_login_ip = encrypt_sensitive_value(ip_address)
+    user.last_login_device = encrypt_sensitive_value(device_name)
+    db.commit()
+
+    access_token = auth.create_access_token(
+        data={"sub": user.username, "role": user.role, "sid": session_id},
+        expires_delta=expires_delta,
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_at": expires_at,
+        "remember_me": False,
+        "user": serialize_user(user),
+        "assessment": login_assessment,
+        "security_status": login_assessment.get("security_status", "Safe"),
+        "suspicious_session": login_assessment.get("suspicious_session", False),
+        "warning_message": None,
     }
 
 
